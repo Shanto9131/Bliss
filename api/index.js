@@ -1,5 +1,5 @@
 // Vercel serverless entry: every page and API request is routed here (see vercel.json).
-// Static files in /public are served by Vercel's CDN directly.
+// The shared app restores the original URL from the rewrite and handles the request.
 import { createApp } from '../server/app.js';
 
 let appPromise = null;

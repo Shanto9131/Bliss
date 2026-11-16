@@ -39,6 +39,11 @@ export async function createApp({ reset = false } = {}) {
   const origin = (req) => process.env.PUBLIC_URL?.replace(/\/$/, '') || `${isSecure(req) ? 'https' : 'http'}://${req.headers.host || 'localhost'}`;
 
   async function handler(req, res) {
+    // Vercel rewrite (vercel.json) sends /<path>?<query> as /api/index?__path=<path>&<query>: restore it.
+    if (req.url.startsWith('/api/index')) {
+      const u = new URL(req.url, 'http://localhost'), p = u.searchParams.get('__path');
+      if (p !== null) { u.searchParams.delete('__path'); const qs = u.searchParams.toString(); req.url = '/' + p.replace(/^\/+/, '') + (qs ? `?${qs}` : ''); }
+    }
     for (const k in SECURITY_HEADERS) res.setHeader(k, SECURITY_HEADERS[k]);
     if (PROD && isSecure(req)) res.setHeader('Strict-Transport-Security', 'max-age=15552000');
     let url, pathname;

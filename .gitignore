@@ -3,3 +3,6 @@ data/
 uploads/
 node_modules/
 *.log
+
+.vercel
+.env*
