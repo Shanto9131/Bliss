@@ -142,6 +142,23 @@ server {
 
 cPanel hosting with "Setup Node.js App" also works: set the startup file to `server.js`.
 
+### Vercel (quick public demo)
+
+This repo is Vercel-ready (`vercel.json` + `api/index.js`): import it at https://vercel.com/new and
+click **Deploy**. Static files are served by Vercel's CDN; pages and the API run as a serverless function.
+
+**Important:** Vercel has no permanent disk. The whole shop works, but orders, uploaded photos and
+dashboard changes are kept only temporarily and **reset when Vercel restarts the function** (after
+some idle time or a new deploy). Use Vercel to show the shop; for real selling use a host with a
+disk (a VPS, or Railway/Render with a volume), or connect a hosted database.
+
+Set these in Vercel › Project › Settings › Environment Variables:
+
+| Variable | Why |
+|---|---|
+| `SESSION_SECRET` | Any long random text, so dashboard logins work on every Vercel server |
+| `ADMIN_PASSWORD` | Your dashboard password (on Vercel, change it here, not in the dashboard) |
+
 ### Settings via environment variables (all optional)
 
 | Variable | Purpose |
