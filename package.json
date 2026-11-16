@@ -1,0 +1,18 @@
+{
+  "name": "bliss-gift-shop",
+  "version": "1.0.0",
+  "description": "BLISS — a fast, zero-dependency gift shop with a full admin dashboard.",
+  "type": "module",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "art": "node scripts/generate-art.js",
+    "reset": "node server.js --reset"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "UNLICENSED"
+}

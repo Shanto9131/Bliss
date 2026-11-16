@@ -1,0 +1,5 @@
+# Live shop data: contains customer details. Back it up, never commit it.
+data/
+uploads/
+node_modules/
+*.log

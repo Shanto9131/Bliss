@@ -1,0 +1,9 @@
+{
+  "name": "BLISS — Gifts & Moments",
+  "short_name": "BLISS",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FFF9F4",
+  "theme_color": "#8E2C5C",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
