@@ -417,7 +417,8 @@ export function computeTotals(lines, opts) {
 
   const afterDiscount = subtotal - discount;
   let delivery = 0, freeDelivery = false;
-  if (count > 0) {
+  if (opts.noDelivery) delivery = 0;
+  else if (count > 0) {
     if (opts.express) delivery = d.express;
     else {
       delivery = opts.zone === 'outside' ? d.outside : d.inside;
@@ -440,5 +441,51 @@ export const ORDER_STATUSES = [
   ['shipped', 'Out for delivery'],
   ['delivered', 'Delivered'],
   ['cancelled', 'Cancelled'],
+  ['returned', 'Returned'],
 ];
+/** Orders in these states are not sales: their stock is back on the shelf. */
+export const INACTIVE_STATUSES = new Set(['cancelled', 'returned']);
+
+/**
+ * Settings a funnel (landing page) order is priced with. Shared by browser and server so the
+ * total the shopper sees is exactly the total the server charges.
+ */
+export function funnelSettings(settings, f) {
+  const d = settings.delivery || {};
+  const num = (v, dflt) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? dflt : Number(v));
+  return {
+    ...settings,
+    bundleTiers: [],
+    delivery: {
+      ...d,
+      inside: f.freeDelivery ? 0 : num(f.deliveryInside, d.inside),
+      outside: f.freeDelivery ? 0 : num(f.deliveryOutside, d.outside),
+      freeOver: f.freeDelivery ? 0 : d.freeOver,
+    },
+  };
+}
+
+/** Where a visit came from, from the landing URL + referrer (browser only, but pure). */
+export function detectSource(search, referrer) {
+  const q = new URLSearchParams(search || '');
+  const utm = (q.get('utm_source') || '').toLowerCase().trim();
+  const campaign = (q.get('utm_campaign') || '').slice(0, 60);
+  const map = (s) => (/^(fb|facebook|meta|ig|instagram|messenger)/.test(s) ? (/^(ig|instagram)/.test(s) ? 'instagram' : 'facebook') : /google|gads|adwords/.test(s) ? 'google' : /tiktok/.test(s) ? 'tiktok' : /youtube|yt/.test(s) ? 'youtube' : /whatsapp|wa$/.test(s) ? 'whatsapp' : /mail|newsletter/.test(s) ? 'email' : /sms/.test(s) ? 'sms' : s.replace(/[^a-z0-9_-]/g, '').slice(0, 20) || 'other');
+  if (utm) return { channel: map(utm), campaign };
+  if (q.has('fbclid')) return { channel: 'facebook', campaign };
+  if (q.has('gclid') || q.has('gbraid') || q.has('wbraid')) return { channel: 'google', campaign };
+  if (q.has('ttclid')) return { channel: 'tiktok', campaign };
+  let host = '';
+  try { host = referrer ? new URL(referrer).hostname.replace(/^www\./, '') : ''; } catch { host = ''; }
+  if (!host) return { channel: 'direct', campaign };
+  if (/(^|\.)facebook\.com$|(^|\.)fb\.com$|messenger\.com$/.test(host)) return { channel: 'facebook', campaign };
+  if (/instagram\.com$/.test(host)) return { channel: 'instagram', campaign };
+  if (/(^|\.)google\./.test(host)) return { channel: 'google', campaign };
+  if (/tiktok\.com$/.test(host)) return { channel: 'tiktok', campaign };
+  if (/youtube\.com$|youtu\.be$/.test(host)) return { channel: 'youtube', campaign };
+  if (/whatsapp\.com$/.test(host)) return { channel: 'whatsapp', campaign };
+  if (/bing\.com$|duckduckgo\.com$|yahoo\./.test(host)) return { channel: 'search', campaign };
+  return { channel: 'referral', campaign };
+}
+export const CHANNELS = { direct: 'Direct', facebook: 'Facebook', instagram: 'Instagram', google: 'Google', tiktok: 'TikTok', youtube: 'YouTube', whatsapp: 'WhatsApp', email: 'Email', sms: 'SMS', search: 'Other search', referral: 'Other websites', phone: 'Phone call', 'walk-in': 'Walk-in', other: 'Other' };
 export const STOCK_LABEL = { in: 'In stock', limited: 'Limited stock', out: 'Out of stock' };

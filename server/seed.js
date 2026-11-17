@@ -55,8 +55,64 @@ export function defaultSettings() {
         { id: 'black', name: 'Black', color: '#1F1A24' },
       ],
     },
+    // Your real costs per order, so the dashboard can show profit (not just sales).
+    costs: { courierInside: 60, courierOutside: 110, packaging: 25, codPct: 1 },
+    vipSpend: 10000,
+    // Uploaded photos are fitted to the shop's frames (products 4:5, categories square) in the browser.
+    photos: { fit: 'auto', bg: 'auto' },
+    // Sales boosters: every one can be switched on/off in Dashboard › Sales boosters.
+    boosters: {
+      proof: true, proofNames: false, soldCount: true, chat: true, fbt: true, capture: true,
+      popup: { enabled: false, delay: 12, exit: true, ask: 'email', title: 'Wait! A little gift from us', text: 'Join our list and get a welcome discount on your first order.', coupon: 'WELCOME5' },
+      bump: { enabled: false, pid: '', price: 0, title: 'Add a sweet surprise' },
+      upsell: { enabled: false, pid: '', price: 0, title: 'Wait! Add this for a special price', minutes: 30 },
+      campaign: { enabled: false, text: '', ends: '', coupon: '', link: '/offers' },
+    },
+    tracking: { fbPixel: '', ga4: '', tiktok: '' },
     admin: { username: DEFAULT_ADMIN.username, password: '', pv: 1, isDefault: true },
   };
+}
+
+/** Estimated purchase cost for demo products (about 52% of the selling price). */
+export const demoCost = (price) => Math.round((price * 0.52) / 10) * 10;
+/** Sample funnels so the Funnels page shows how each type works. */
+export function demoFunnels(products) {
+  const now = Date.now();
+  const bySlug = new Map(products.map((p) => [p.slug, p]));
+  const hero = bySlug.get('blush-bloom-gift-box') || products[0];
+  const bump = bySlug.get('belgian-truffle-box-9-pcs') || products[1];
+  const up = bySlug.get('forever-heart-pendant') || products[2];
+  if (!hero) return [];
+  return [
+    {
+      id: 'f_demo_product', slug: 'blush-bloom-offer', type: 'product', name: 'Blush Bloom: Facebook ad landing page', active: true, created: now, updated: now, demo: true,
+      headline: 'The gift box that makes her *cry happy tears*',
+      subheadline: 'A gold heart pendant, vanilla candle, Belgian truffles and a handwritten card, wrapped and delivered to her door. Pay cash on delivery.',
+      image: hero.images[0], video: '', cta: 'Order now, pay on delivery',
+      body: 'Finding the right gift is hard. Getting it wrapped, carded and delivered on time is harder.\n\nThe Blush Bloom box does it all for you. Every box is hand-packed in Dhaka, checked twice, and delivered with a free handwritten message card.',
+      benefits: ['Hand-packed keepsake box with satin ribbon', 'Free handwritten message card', 'Delivered in 1–2 days in Dhaka, 2–4 days across Bangladesh', 'Cash on delivery: check it, then pay'],
+      faq: [{ q: 'Can I send it directly to her?', a: 'Yes. Add her address and number in the form. We will not include the price.' }, { q: 'How do I pay?', a: 'Cash on delivery. Pay the rider when the box arrives.' }, { q: 'What if something is damaged?', a: 'Tell us within 24 hours with a photo and we replace it free.' }],
+      guarantee: '7-day happiness guarantee. Damaged on arrival? We replace it free.',
+      pid: hero.id, compare: hero.compare || 0,
+      packages: [{ label: '1 box', qty: 1, price: hero.price }, { label: '2 boxes (save ৳300)', qty: 2, price: hero.price * 2 - 300 }],
+      deadline: { mode: 'evergreen', at: '', minutes: 45 }, freeDelivery: false, deliveryInside: null, deliveryOutside: null, showReviews: true,
+      bump: { enabled: !!bump, pid: bump?.id || '', price: bump ? Math.max(0, bump.price - 200) : 0, text: 'Add a 9-piece Belgian truffle box' },
+      upsell: { enabled: !!up, pid: up?.id || '', price: up ? Math.max(0, up.price - 250) : 0, headline: 'Make it extra special', text: 'Add the Forever Heart Pendant to the same delivery at a one-time price.' },
+      coupon: '', askEmail: false, success: '', ctaLink: '', pids: [],
+    },
+    {
+      id: 'f_demo_lead', slug: 'eid-giveaway', type: 'lead', name: 'Eid giveaway: collect phone numbers', active: true, created: now, updated: now, demo: true,
+      headline: 'Win an Eid hamper worth ৳2,490',
+      subheadline: 'Enter your number for a chance to win our Golden Hour Hamper. Everyone who enters gets 5% off their next gift.',
+      image: bySlug.get('golden-hour-hamper')?.images[0] || hero.images[0], video: '', cta: 'Enter the giveaway',
+      body: 'We pick one winner every Friday and call them on the number they entered.',
+      benefits: ['One winner every Friday', 'Instant 5% off code for everyone', 'No spam. One message when the winner is announced'],
+      faq: [], guarantee: '', pid: '', compare: 0, packages: [], deadline: { mode: 'none', at: '', minutes: 0 },
+      freeDelivery: false, deliveryInside: null, deliveryOutside: null, showReviews: false,
+      bump: { enabled: false, pid: '', price: 0, text: '' }, upsell: { enabled: false, pid: '', price: 0, headline: '', text: '' },
+      coupon: 'WELCOME5', askEmail: true, success: 'You are in! Here is your discount code for any gift in the shop.', ctaLink: '/shop', pids: [],
+    },
+  ];
 }
 
 export const CATEGORIES = [
@@ -207,6 +263,7 @@ export async function seedData() {
       desc: d.desc, highlights: HIGHLIGHTS[d.cat] || [],
       images: [`/img/p/${d.slug}.svg`, `/img/p/${d.slug}-detail.svg`],
       status: qty === 0 ? 'out' : qty <= 5 ? 'limited' : 'in', qty, lowStock: null, autoStock: true,
+      cost: demoCost(d.price), sku: 'BL-' + String(i + 1).padStart(3, '0'), supplier: '', saleEnds: null,
       tags: d.tags, gender: d.gender, options: d.options || [],
       featured: !!d.featured, boxable: !!d.boxable && !(d.options || []).length, active: true, keywords: '',
       sold: Math.floor(20 + rnd() * 380 + (d.featured ? 300 : 0)),
@@ -237,17 +294,20 @@ export async function seedData() {
       const p = pick(inStock);
       if (lines.some((l) => l.pid === p.id)) continue;
       const options = Object.fromEntries((p.options || []).map((o) => [o.name, pick(o.values)]));
-      lines.push({ kind: 'product', pid: p.id, name: p.name, slug: p.slug, img: p.images[0], price: p.price, qty: rnd() < 0.85 ? 1 : 2, options });
+      lines.push({ kind: 'product', pid: p.id, name: p.name, slug: p.slug, img: p.images[0], price: p.price, cost: p.cost, qty: rnd() < 0.85 ? 1 : 2, options });
     }
     const [line, area, city, zone] = pick(AREAS);
     const express = zone === 'inside' && rnd() < 0.25;
     const wrap = rnd() < 0.4;
     const t = computeTotals(lines, { settings, zone, express, giftWrap: wrap });
-    const status = daysAgo > 6 ? (rnd() < 0.08 ? 'cancelled' : 'delivered') : daysAgo > 3 ? pick(['shipped', 'delivered', 'delivered']) : daysAgo > 1 ? pick(['confirmed', 'processing', 'shipped']) : pick(['pending', 'pending', 'confirmed']);
+    const roll = rnd();
+    const status = daysAgo > 6 ? (roll < 0.08 ? 'cancelled' : roll < 0.13 ? 'returned' : 'delivered') : daysAgo > 3 ? pick(['shipped', 'delivered', 'delivered']) : daysAgo > 1 ? pick(['confirmed', 'processing', 'shipped']) : pick(['pending', 'pending', 'confirmed']);
     const flow = ['pending', 'confirmed', 'processing', 'shipped', 'delivered'];
     const timeline = status === 'cancelled'
       ? [{ status: 'pending', at: created, note: '' }, { status: 'cancelled', at: created + 7200_000, note: 'Customer requested cancellation' }]
-      : flow.slice(0, flow.indexOf(status) + 1).map((s, j) => ({ status: s, at: created + j * 9 * 3600_000, note: '' }));
+      : status === 'returned'
+        ? [...flow.slice(0, 4).map((s, j) => ({ status: s, at: created + j * 9 * 3600_000, note: '' })), { status: 'returned', at: created + 50 * 3600_000, note: 'Customer refused at the door' }]
+        : flow.slice(0, flow.indexOf(status) + 1).map((s, j) => ({ status: s, at: created + j * 9 * 3600_000, note: '' }));
     const name = pick(NAMES);
     const pm = rnd() < 0.7 ? 'cod' : rnd() < 0.7 ? 'bkash' : 'nagad';
     let id = 'BL'; for (let j = 0; j < 6; j++) id += A[Math.floor(rnd() * A.length)];
@@ -259,6 +319,8 @@ export async function seedData() {
       gift: { wrap, message: wrap ? 'Happy birthday! With love ❤' : '', hidePrice: wrap },
       items: lines, totals: { count: t.count, subtotal: t.subtotal, discount: t.discount, discountLabel: t.discountLabel, delivery: t.delivery, wrap: t.wrap, total: t.total },
       coupon: null, payment: { method: pm, trxId: pm === 'cod' ? '' : 'TX' + Math.floor(rnd() * 1e9).toString(36).toUpperCase(), status: status === 'delivered' || pm !== 'cod' ? 'paid' : 'unpaid' },
+      source: { channel: pick(['facebook', 'facebook', 'facebook', 'instagram', 'direct', 'google', 'whatsapp']), campaign: '', funnel: null },
+      courier: ['shipped', 'delivered', 'returned'].includes(status) ? { name: zone === 'inside' ? 'Pathao' : 'Steadfast', tracking: 'SF' + Math.floor(1e7 + rnd() * 9e7), cost: zone === 'inside' ? 60 : 110 } : null,
       status, timeline, note: '', adminNote: '', demo: true,
     });
   }
@@ -266,6 +328,8 @@ export async function seedData() {
 
   return {
     settings, categories, products, orders, users: [], reviews,
+    funnels: demoFunnels(products), leads: [], abandoned: [], expenses: [], stockLog: [], customerNotes: {}, analytics: { days: {} },
+    meta: { schema: 2 },
     coupons: [
       { code: 'WELCOME5', type: 'percent', value: 5, minSubtotal: 0, maxDiscount: 300, expires: null, maxUses: null, used: 0, active: true, created: now },
       { code: 'BLISS10', type: 'percent', value: 10, minSubtotal: 1500, maxDiscount: 400, expires: null, maxUses: null, used: 0, active: true, created: now },

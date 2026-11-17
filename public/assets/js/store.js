@@ -1,6 +1,6 @@
 // BLISS storefront: a tiny, framework-free SPA. All catalogue data arrives inside the HTML,
 // so browsing, filtering and search run locally (no network) through the engine's indexes.
-import { CatalogIndex, LRU, computeTotals, money, escapeHtml as esc, ORDER_STATUSES, tokenize } from './engine.js';
+import { CatalogIndex, LRU, computeTotals, money, escapeHtml as esc, ORDER_STATUSES, tokenize, funnelSettings, detectSource } from './engine.js';
 
 /* ================================================================ helpers */
 const $ = (s, r = document) => r.querySelector(s);
@@ -16,7 +16,7 @@ const ss = {
   set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch { /* ignore */ } },
   del(k) { try { sessionStorage.removeItem(k); } catch { /* ignore */ } },
 };
-const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+const debounce = (fn, ms) => { let t; const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; d.cancel = () => clearTimeout(t); return d; };
 const off = (p) => (p.compare > p.price ? Math.round((1 - p.price / p.compare) * 100) : 0);
 const fmtDate = (ts, o = { day: 'numeric', month: 'short', year: 'numeric' }) => new Intl.DateTimeFormat('en-GB', { ...o, timeZone: 'Asia/Dhaka' }).format(new Date(ts));
 const fmtTime = (ts) => new Intl.DateTimeFormat('en-GB', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Dhaka' }).format(new Date(ts));
@@ -96,6 +96,7 @@ function addToCart(p, qty = 1, options = {}, { silent = false } = {}) {
   saveCart(); bumpBag();
   if (layer.type === 'drawer') renderCartDrawer();
   if (!silent) toast(`Added to bag: ${p.name}`, 'ok', { label: 'View bag', act: 'open-cart' });
+  beacon({ step: 'cart' }); px('cart', [pxItem(p, qty)]);
   return true;
 }
 function changeQty(key, d) {
@@ -203,7 +204,8 @@ function badgeHtml(p) {
   if (p.stock === 'out') b += '<b class="badge b-out">Sold out</b>';
   else {
     const o = off(p); if (o >= 5) b += `<b class="badge b-sale">−${o}%</b>`;
-    if (Date.now() - p.created < 21 * DAY) b += '<b class="badge b-new">New</b>';
+    if (p.ends && Date.parse(p.ends) - Date.now() < 3 * DAY) b += '<b class="badge b-ends">Sale ends soon</b>';
+    else if (Date.now() - p.created < 21 * DAY) b += '<b class="badge b-new">New</b>';
   }
   return b ? `<span class="badges">${b}</span>` : '';
 }
@@ -272,6 +274,7 @@ const ROUTES = [
   [/^\/help$/, () => viewHelp()],
   [/^\/about$/, () => viewAbout()],
   [/^\/policies\/([a-z]+)$/, (m) => viewPolicy(m[1])],
+  [/^\/f\/([^/]+)$/, (m) => viewFunnel(m[1])],
 ];
 function render(y = 0) {
   let path; try { path = decodeURIComponent(location.pathname); } catch { path = location.pathname; }
@@ -290,9 +293,12 @@ function render(y = 0) {
   view.root = root;
   const brand = C.settings.store.name;
   document.title = view.title ? `${view.title} | ${brand}` : `${brand} | ${C.settings.store.tagline}`;
+  document.body.classList.toggle('funnel-mode', view.name === 'funnel');
+  document.body.dataset.view = view.name || '';
   view.mount?.(root);
   for (const a of $$('[data-nav]')) a.classList.toggle('active', a.dataset.nav === (view.nav || view.name));
   window.scrollTo(0, y);
+  px('page'); chatButton();
 }
 function navigate(url, { replace = false } = {}) {
   const u = new URL(url, location.href);
@@ -755,7 +761,9 @@ function viewProduct(slug) {
         <h1>${esc(p.name)}</h1>
         <div class="pdp-meta">${p.reviews ? `<a href="#reviews" class="rating-link">${stars(p.rating)}<b>${p.rating.toFixed(1)}</b><span>${plural(p.reviews, 'review')}</span></a>` : '<span class="muted">No reviews yet</span>'}<span class="dot"></span><button type="button" class="link-btn" data-act="share">${ic('share')}Share</button></div>
         <div class="pdp-price">${priceHtml(p, 'lg')}${saving ? `<span class="save">You save ${money(saving)} (${off(p)}%)</span>` : ''}</div>
+        ${p.ends && Date.parse(p.ends) > Date.now() ? `<div class="sale-timer" data-timer-host="sale">${ic('clock')}<span>Sale price ends in</span><b data-ends="${esc(p.ends)}">${leftText(Date.parse(p.ends) - Date.now())}</b></div>` : ''}
         <div class="pdp-stock">${stockHtml(p, true)}${p.stock === 'limited' && p.left != null ? `<div class="stockbar"><i style="width:${Math.max(8, Math.min(100, p.left * 10))}%"></i></div>` : ''}</div>
+        ${B().soldCount && p.recent >= 3 && p.stock !== 'out' ? `<p class="sold-recent">${ic('trend')}<span><b>${p.recent} sold</b> in the last 7 days</span></p>` : ''}
         ${buyBoxHtml(p, sel)}
         <button type="button" class="btn btn-ghost btn-block wish-btn${S.wish.has(p.id) ? ' on' : ''}" data-act="wish" data-id="${p.id}" aria-pressed="${S.wish.has(p.id)}">${ic('heart')}<span>Save to wishlist</span></button>
         ${p.stock !== 'out' ? bundleHint() : ''}
@@ -767,6 +775,7 @@ function viewProduct(slug) {
         <div class="pdp-acc" id="pdp-acc">${detailAccordions(p, ready)}</div>
       </div>
     </div>
+    ${fbtHtml(p)}
     <section class="sec reviews" id="reviews">${reviewsHtml(p, ready)}</section>
     ${related.length ? `<section class="sec">${secHead('Complete the gift', 'Pairs beautifully with this.')}${railHtml(related)}</section>` : ''}
     ${recent.length ? `<section class="sec">${secHead('Recently viewed', '')}${railHtml(recent)}</section>` : ''}
@@ -779,6 +788,8 @@ function viewProduct(slug) {
       bindBuyBox(box, p, sel);
       bindGallery(root);
       bindReviewForm(root, p);
+      bindFbt(root, p, sel);
+      beacon({ step: 'product', pid: p.id }); px('view', [pxItem(p)]);
       const sticky = $('#sticky-atc', root), atc = $('#atc', root);
       if (sticky && atc && 'IntersectionObserver' in window) {
         const io = new IntersectionObserver(([en]) => { const show = !en.isIntersecting && en.boundingClientRect.top < 0; sticky.classList.toggle('show', show); sticky.setAttribute('aria-hidden', !show); });
@@ -937,7 +948,28 @@ function refreshCartViews() {
   if (current?.name === 'cart' || current?.name === 'checkout') current.refresh?.();
 }
 
+/** Opens a saved bag from an abandoned-checkout link (/cart?restore=TOKEN). */
+async function restoreCart(token) {
+  try {
+    const d = await api(`/api/checkout/restore/${encodeURIComponent(token)}`);
+    const keep = ss.get('bliss.checkout', {});
+    ss.set('bliss.checkout', { ...keep, name: d.name || keep.name, phone: d.phone || keep.phone, email: d.email || keep.email, city: d.city || keep.city });
+    if (d.funnel) { navigate(`/f/${d.funnel}`, { replace: true }); return; }
+    for (const it of d.items) {
+      if (it.offer === 'bump' || it.pkg !== undefined) continue;
+      const l = it.kind === 'box'
+        ? { key: 'box|' + Math.random().toString(36).slice(2, 9), kind: 'box', boxId: it.boxId, wrapId: it.wrapId, ribbonId: it.ribbonId, items: it.items, to: it.to, from: it.from, note: it.note, qty: it.qty }
+        : IDX.byId.get(it.pid) ? { key: lineKey(it.pid, it.options), pid: it.pid, qty: it.qty, options: it.options || {} } : null;
+      if (l && !S.cart.some((x) => x.key === l.key)) S.cart.push(l);
+    }
+    saveCart();
+    toast('Welcome back! Your bag is just as you left it.');
+    navigate(S.cart.length ? '/checkout' : '/shop', { replace: true });
+  } catch (err) { toast(err.message, 'error'); navigate('/cart', { replace: true }); }
+}
 function viewCart() {
+  const restore = new URLSearchParams(location.search).get('restore');
+  if (restore) return { name: 'cart', title: 'Your bag', html: '<div class="container narrow"><div class="loading"><span class="spinner"></span>Opening your bag…</div></div>', mount() { restoreCart(restore); } };
   const draw = () => {
     const lines = resolveCart(), t = totalsFor(lines);
     if (!lines.length) return `<div class="container narrow"><div class="empty big">${ic('bag', 'empty-ic')}<h1>Your bag is empty</h1><p>Browse our best sellers or build a custom gift box.</p><div class="row-gap"><a class="btn btn-primary btn-lg" href="/shop">Shop gifts</a><a class="btn btn-ghost btn-lg" href="/gift-box-builder">Build a gift box</a></div></div></div>`;
@@ -1004,6 +1036,7 @@ function viewCheckout() {
   };
   const P = C.settings.payments, dl = C.settings.delivery, today = dhakaNow().date;
   const cityKnown = CITIES.includes(v.city);
+  const bp = B().bump, bpP = bp && IDX.byId.get(bp.pid), bumpOk = !!(bpP && bpP.stock !== 'out');
   const html = `
   <div class="container checkout">
     <header class="page-head"><a class="link-arrow back" href="/cart">${ic('arrow-left')} Back to bag</a><h1>Checkout</h1>${S.user ? `<p>Signed in as <b>${esc(S.user.name)}</b></p>` : `<p>Have an account? <a href="/account?next=/checkout">Log in</a> for faster checkout. Guest checkout is fine too.</p>`}</header>
@@ -1049,6 +1082,7 @@ function viewCheckout() {
           <label class="check"><input type="checkbox" name="hidePrice" ${v.hidePrice ? 'checked' : ''}><span class="box"></span>Hide prices on the invoice (great for surprises)</label>
         </section>
 
+        ${bumpOk ? `<label class="bump"><input type="checkbox" name="bump" ${saved.bump ? 'checked' : ''}><span class="bump-box"><span class="bump-check"></span><img src="${esc(bpP.img)}" alt="" width="56" height="70"><span><b>${esc(bp.title || `Yes! Add ${bpP.name}`)}</b><small>${esc(bpP.name)} for just <b>${money(bp.price)}</b>${bpP.price > bp.price ? ` <s>${money(bpP.price)}</s>` : ''}. Only at checkout.</small></span></span></label>` : ''}
         <section class="co-sec"><h2><span>5</span>Payment</h2>
           <div class="radio-cards pay-cards">
             ${P.cod ? `<label class="rcard"><input type="radio" name="pay" value="cod" ${v.pay === 'cod' ? 'checked' : ''}><span class="rc-body">${ic('cash')}<b>Cash on delivery</b><small>Pay when your gift arrives</small></span></label>` : ''}
@@ -1074,8 +1108,15 @@ function viewCheckout() {
       const val = () => {
         const fd = Object.fromEntries(new FormData(f));
         const city = fd.cityPick === '__other' ? (fd.cityOther || '').trim() : fd.cityPick;
-        return { ...fd, city, gift: !!fd.gift, wrap: !!fd.wrap, hidePrice: !!fd.hidePrice };
+        return { ...fd, city, gift: !!fd.gift, wrap: !!fd.wrap, hidePrice: !!fd.hidePrice, bump: bumpOk && !!fd.bump };
       };
+      const draft = debounce(() => {
+        const x = val();
+        if (!B().capture || !PHONE_RE.test(cleanPhone(x.phone))) return;
+        api('/api/checkout/draft', { method: 'POST', body: { sid: SID, name: x.name, phone: cleanPhone(x.phone), email: x.email, city: x.city, items: cartPayload(x), total: t?.total || 0, channel: attribution().channel } }).catch(() => {});
+      }, 1200);
+      beacon({ step: 'checkout' });
+      px('checkout', resolveCart().filter((l) => !l.missing && l.kind !== 'box').map((l) => pxItem(l.p, l.qty)));
       let t;
       const recalc = () => {
         const x = val(), zone = zoneOf(x.city), lines = resolveCart();
@@ -1088,7 +1129,7 @@ function viewCheckout() {
         const ex = expressInfo();
         const note = $('.express-note', root); note.hidden = !express; $('#express-msg', root).textContent = express ? (ex.today ? `${ex.text}. Your gift will arrive within ${dl.expressHours} hours of confirmation.` : `It's past today's ${dl.cutoffHour > 12 ? dl.cutoffHour - 12 + 'pm' : dl.cutoffHour + 'am'} cutoff, so we'll deliver first thing tomorrow.`) : '';
         $('.schedule', root).hidden = express;
-        t = totalsFor(lines, { zone, express, giftWrap: x.wrap });
+        t = computeTotals([...okLines(lines), ...(x.bump ? [{ price: bp.price, qty: 1 }] : [])], { settings: C.settings, coupon: S.coupon, zone, express, giftWrap: x.wrap });
         const std = zone === 'outside' ? dl.outside : dl.inside;
         $('#std-price', root).textContent = t.freeDelivery && !express ? 'Free' : money(std);
         $('.recipient', root).hidden = !x.gift;
@@ -1099,7 +1140,7 @@ function viewCheckout() {
         $('#msg-count', root).textContent = (x.message || '').length;
         const bad = lines.some((l) => l.missing || l.out);
         sum.innerHTML = `<h2>Order summary</h2>
-          <ul class="mini-lines">${lines.map((l) => `<li class="${l.missing || l.out ? 'bad' : ''}"><span class="mi-img"><img src="${esc(l.img)}" alt="" width="56" height="70"><b>${l.qty}</b></span><span class="mi-name">${esc(l.name)}${l.kind === 'box' ? `<small>${plural(l.items.length, 'item')} inside</small>` : Object.entries(l.options || {}).map(([k, o]) => `<small>${esc(k)}: ${esc(o)}</small>`).join('')}${l.missing || l.out ? '<em class="warn">Unavailable, remove it in your bag</em>' : ''}</span><b>${money(l.price * l.qty)}</b></li>`).join('')}</ul>
+          <ul class="mini-lines">${lines.map((l) => `<li class="${l.missing || l.out ? 'bad' : ''}"><span class="mi-img"><img src="${esc(l.img)}" alt="" width="56" height="70"><b>${l.qty}</b></span><span class="mi-name">${esc(l.name)}${l.kind === 'box' ? `<small>${plural(l.items.length, 'item')} inside</small>` : Object.entries(l.options || {}).map(([k, o]) => `<small>${esc(k)}: ${esc(o)}</small>`).join('')}${l.missing || l.out ? '<em class="warn">Unavailable, remove it in your bag</em>' : ''}</span><b>${money(l.price * l.qty)}</b></li>`).join('')}${x.bump ? `<li><span class="mi-img"><img src="${esc(bpP.img)}" alt="" width="56" height="70"><b>1</b></span><span class="mi-name">${esc(bpP.name)}<small>Checkout offer</small></span><b>${money(bp.price)}</b></li>` : ''}</ul>
           ${couponHtml(t)}
           <div class="sum-row"><span>Subtotal (${plural(t.count, 'item')})</span><b>${money(t.subtotal)}</b></div>
           ${t.discount ? `<div class="sum-row disc"><span>${esc(t.discountLabel)}</span><b>−${money(t.discount)}</b></div>` : ''}
@@ -1114,10 +1155,11 @@ function viewCheckout() {
         const keep = { ...x }; delete keep.trx; ss.set('bliss.checkout', keep);
       };
       this.recalc = recalc;
+      f.addEventListener('input', (e) => { if (['phone', 'name', 'email', 'line'].includes(e.target.name)) draft(); });
       f.addEventListener('input', (e) => { e.target.closest('.field')?.classList.remove('invalid'); if (!['message', 'note', 'line', 'name', 'email', 'area', 'trx', 'rname', 'rphone', 'phone', 'cityOther'].includes(e.target.name)) recalc(); else { const x = val(); const keep = { ...x }; delete keep.trx; ss.set('bliss.checkout', keep); $('#msg-count', root).textContent = (x.message || '').length; } });
       f.addEventListener('change', recalc);
       $('#copy-num', root).addEventListener('click', () => ACTIONS.copy({ dataset: { text: $('.pm-number', root).textContent } }));
-      f.addEventListener('submit', (e) => { e.preventDefault(); submitOrder(f, val(), t, root); });
+      f.addEventListener('submit', (e) => { e.preventDefault(); draft.cancel(); submitOrder(f, val(), t, root); });
       recalc();
     },
   };
@@ -1126,6 +1168,12 @@ function markInvalid(f, name, msg) {
   const el = f.elements[name]; if (!el) return;
   const field = el.closest('.field') || el.closest('label');
   if (field) { field.classList.add('invalid'); let m = field.querySelector('.err'); if (!m) { m = document.createElement('small'); m.className = 'err'; field.append(m); } m.textContent = msg; }
+}
+/** Bag lines as the order API expects them (+ the checkout add-on when ticked). */
+function cartPayload(x = {}) {
+  const items = S.cart.map((l) => (l.kind === 'box' ? { kind: 'box', boxId: l.boxId, wrapId: l.wrapId, ribbonId: l.ribbonId, items: l.items, to: l.to, from: l.from, note: l.note, qty: l.qty } : { pid: l.pid, qty: l.qty, options: l.options }));
+  if (x.bump && B().bump) items.push({ pid: B().bump.pid, offer: 'bump' });
+  return items;
 }
 async function submitOrder(f, x, t, root) {
   $$('.field.invalid', f).forEach((el) => el.classList.remove('invalid'));
@@ -1146,24 +1194,20 @@ async function submitOrder(f, x, t, root) {
   const btn = $('#co-submit', root), errBox = $('#co-error', root);
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Placing your order…'; errBox.hidden = true;
   const payload = {
-    items: S.cart.map((l) => (l.kind === 'box' ? { kind: 'box', boxId: l.boxId, wrapId: l.wrapId, ribbonId: l.ribbonId, items: l.items, to: l.to, from: l.from, note: l.note, qty: l.qty } : { pid: l.pid, qty: l.qty, options: l.options })),
+    items: cartPayload(x),
     customer: { name: x.name, phone: cleanPhone(x.phone), email: x.email },
     recipient: x.gift ? { name: x.rname, phone: cleanPhone(x.rphone) } : null,
     address: { line: x.line, area: x.area, city: x.city, zone: zoneOf(x.city) },
     delivery: { method: x.method === 'express' && zoneOf(x.city) === 'inside' ? 'express' : 'standard', date: x.date || null, slot: x.slot || null },
     gift: { wrap: x.wrap, message: x.message, hidePrice: x.hidePrice },
     payment: { method: x.pay, trxId: (x.trx || '').replace(/\s/g, '') },
-    coupon: S.coupon?.code || '', note: x.note, expectedTotal: t.total,
+    coupon: S.coupon?.code || '', note: x.note, expectedTotal: t.total, source: attribution(),
   };
   try {
-    const { order } = await api('/api/orders', { method: 'POST', body: payload });
-    const mine = ls.get('bliss.orders', []);
-    ls.set('bliss.orders', [order, ...mine.filter((o) => o.id !== order.id)].slice(0, 20));
+    const items = resolveCart().filter((l) => !l.missing && l.kind !== 'box').map((l) => pxItem(l.p, l.qty));
+    const r = await api('/api/orders', { method: 'POST', body: payload });
     S.cart = []; saveCart(); S.coupon = null; ls.set('bliss.coupon', null);
-    const keep = ss.get('bliss.checkout', {}); ss.set('bliss.checkout', { name: keep.name, phone: keep.phone, email: keep.email, line: keep.line, area: keep.area, city: keep.city });
-    if (S.user) S.orders = [order, ...S.orders];
-    navigate(`/order/${order.id}`, { replace: true });
-    refreshCatalog(true);
+    afterOrder(r, items);
   } catch (err) {
     btn.disabled = false; btn.innerHTML = `${ic('lock')}Place order · ${money(t.total)}`;
     errBox.hidden = false; errBox.textContent = err.message;
@@ -1176,9 +1220,11 @@ async function submitOrder(f, x, t, root) {
 
 /* ======================================================== order & tracking */
 function timelineHtml(o) {
-  const flow = ORDER_STATUSES.filter(([k]) => k !== 'cancelled');
-  if (o.status === 'cancelled') return `<div class="notice warn">${ic('info')}<p>This order was cancelled${o.timeline.at(-1)?.note ? `: ${esc(o.timeline.at(-1).note)}` : '.'} Need help? <a href="/help">Contact us</a>.</p></div>`;
+  const flow = ORDER_STATUSES.filter(([k]) => k !== 'cancelled' && k !== 'returned');
+  if (o.status === 'cancelled' || o.status === 'returned') return `<div class="notice warn">${ic('info')}<p>This order was ${o.status}${o.timeline.at(-1)?.note ? `: ${esc(o.timeline.at(-1).note)}` : '.'} Need help? <a href="/help">Contact us</a>.</p></div>`;
   const idx = flow.findIndex(([k]) => k === o.status);
+  const courier = o.courier?.tracking ? `<p class="notice info">${ic('truck')}<span>Sent with <b>${esc(o.courier.name || 'our courier')}</b> · tracking number <b class="mono">${esc(o.courier.tracking)}</b></span></p>` : '';
+  if (courier) return courier + timelineHtml({ ...o, courier: null });
   const at = (k) => o.timeline.filter((x) => x.status === k).at(-1);
   return `<ol class="timeline">${flow.map(([k, label], i) => { const ev = at(k); return `<li class="${i < idx ? 'done' : i === idx ? 'current' : ''}"><span class="tl-dot">${i <= idx ? ic('check') : ''}</span><div><b>${label}</b>${ev ? `<small>${fmtDate(ev.at)} · ${fmtTime(ev.at)}</small>${ev.note ? `<small class="tl-note">${esc(ev.note)}</small>` : ''}` : ''}</div></li>`; }).join('')}</ol>`;
 }
@@ -1206,10 +1252,22 @@ function viewOrder(id) {
     html: `<div class="container narrow order-done">
       <div class="confetti" aria-hidden="true">${Array.from({ length: 24 }, (_, i) => `<i style="--i:${i}"></i>`).join('')}</div>
       <div class="done-head"><span class="done-ic">${ic('check')}</span><h1>Thank you, ${esc(o.customer.name.split(' ')[0])}!</h1><p>Your order is in. We'll call <b>${esc(o.customer.phone)}</b> to confirm it shortly${o.payment.method !== 'cod' ? ' and verify your payment' : ''}.</p></div>
+      ${upsellHtml(o)}
       <div id="order-live">${orderCardHtml(o)}</div>
       <div class="row-gap center"><a class="btn btn-primary btn-lg" href="/track?id=${esc(o.id)}&phone=${esc(o.customer.phone)}">${ic('truck')}Track this order</a><a class="btn btn-ghost btn-lg" href="/shop">Continue shopping</a>${st.whatsapp ? `<a class="btn btn-ghost btn-lg" target="_blank" rel="noopener" href="https://wa.me/${esc(st.whatsapp)}?text=${encodeURIComponent(`Hi! I just placed order ${o.id}.`)}">${ic('whatsapp')}WhatsApp us</a>` : ''}</div>
     </div>`,
     mount(root) {
+      const saveLocal = (patch) => ls.set('bliss.orders', ls.get('bliss.orders', []).map((x) => (x.id === o.id ? { ...x, ...patch } : x)));
+      $('#up-yes', root)?.addEventListener('click', async (e) => {
+        const b = e.currentTarget; b.disabled = true; b.innerHTML = '<span class="spinner"></span>Adding…';
+        try {
+          const r = await api(`/api/orders/${encodeURIComponent(o.id)}/upsell`, { method: 'POST', body: { phone: o.customer.phone } });
+          saveLocal({ ...r.order, offer: null, upsold: true });
+          $('#upsell', root).outerHTML = `<div class="notice ok">${ic('check')}<p><b>Added to your order!</b> New total: ${money(r.order.totals.total)}, paid on delivery.</p></div>`;
+          $('#order-live', root).innerHTML = orderCardHtml(r.order);
+        } catch (err) { toast(err.message, 'error'); $('#upsell', root)?.remove(); saveLocal({ offer: null }); }
+      });
+      $('#up-no', root)?.addEventListener('click', () => { $('#upsell', root)?.remove(); saveLocal({ offer: null }); });
       api(`/api/orders/track?id=${encodeURIComponent(o.id)}&phone=${encodeURIComponent(o.customer.phone)}`).then(({ order }) => {
         const live = $('#order-live', root); if (live) live.innerHTML = orderCardHtml(order);
       }).catch(() => {});
@@ -1557,7 +1615,7 @@ function viewAbout() {
 const POLICIES = {
   shipping: ['Shipping & delivery', () => { const d = C.settings.delivery; return `<p>We deliver to all 64 districts of Bangladesh.</p><h3>Delivery charges</h3><ul><li>Inside Dhaka: ${money(d.inside)} (1–2 days)</li><li>Outside Dhaka: ${money(d.outside)} (2–4 days)</li><li>Bliss Express (${esc(d.expressAreas)}): ${money(d.express)}, within ${esc(d.expressHours)} hours for orders confirmed before ${d.cutoffHour > 12 ? d.cutoffHour - 12 + 'pm' : d.cutoffHour + 'am'}</li>${d.freeOver ? `<li>Free standard delivery on orders over ${money(d.freeOver)}</li>` : ''}</ul><h3>Scheduling</h3><p>You can choose a preferred date and time of day at checkout. We do our best to meet it and will call you if anything changes.</p><h3>Failed deliveries</h3><p>If the recipient can't be reached after two attempts, we'll contact you to rearrange. A second delivery charge may apply.</p>`; }],
   returns: ['Returns & exchanges', () => '<p>We want you to love every gift.</p><h3>Exchanges</h3><p>Unused items in their original packaging can be exchanged within 7 days of delivery. Contact us with your order ID to arrange a pickup.</p><h3>Damaged or wrong items</h3><p>If something arrives damaged or isn\'t what you ordered, tell us within 24 hours with a photo and we\'ll replace it free of charge.</p><h3>Non-returnable items</h3><p>For hygiene and freshness, chocolates, treats, flowers, earrings and personalised or engraved items can\'t be returned unless they arrive damaged.</p><h3>Refunds</h3><p>Approved refunds are sent to your bKash or Nagad account within 5–7 working days.</p>'],
-  privacy: ['Privacy policy', () => '<p>We only collect what we need to deliver your gifts: your name, mobile number, email (optional) and delivery address.</p><h3>How we use it</h3><ul><li>To process, deliver and support your orders</li><li>To send offers, only if you subscribe (you can unsubscribe anytime)</li></ul><h3>What we never do</h3><p>We never sell or rent your personal information. We share delivery details only with our courier partners, and only for delivering your order.</p><h3>Cookies</h3><p>We use essential cookies to keep you logged in, and your browser stores your bag and wishlist on your device. We do not use advertising trackers.</p>'],
+  privacy: ['Privacy policy', () => '<p>We only collect what we need to deliver your gifts: your name, mobile number, email (optional) and delivery address.</p><h3>How we use it</h3><ul><li>To process, deliver and support your orders</li><li>If you start checkout but don\'t finish, we keep the number and bag you entered for up to 7 days so we can help you complete the order</li><li>To send offers, only if you subscribe (you can unsubscribe anytime)</li></ul><h3>What we never do</h3><p>We never sell or rent your personal information. We share delivery details only with our courier partners, and only for delivering your order.</p><h3>Cookies</h3><p>We use essential cookies to keep you logged in, and your browser stores your bag and wishlist on your device. ' + (Object.values(C.settings.tracking || {}).some(Boolean) ? 'We use advertising measurement tools (such as the Facebook, Google or TikTok pixel) to see which of our ads work. They receive the pages you view and what you buy, never your address or phone number.</p>' : 'We do not use advertising trackers.</p>')],
   terms: ['Terms of service', () => '<p>By placing an order you agree to these terms.</p><h3>Orders</h3><p>All orders are confirmed by phone. We may cancel an order if an item becomes unavailable or the delivery details can\'t be verified, and will refund any payment made.</p><h3>Prices</h3><p>Prices are in Bangladeshi Taka (৳) and include VAT where applicable. Delivery charges are shown at checkout.</p><h3>Product images</h3><p>We photograph our products carefully, but colours may vary slightly between screens.</p><h3>Contact</h3><p>Questions? <a href="/help">Get in touch</a>.</p>'],
 };
 function viewPolicy(slug) {
@@ -1576,6 +1634,446 @@ function viewNotFound(msg = 'The page you are looking for has moved or never exi
     html: `<div class="container narrow"><div class="empty big">${ic('gift', 'empty-ic')}<h1>Oops, this gift got lost</h1><p>${esc(msg)}</p><div class="row-gap"><a class="btn btn-primary btn-lg" href="/shop">Browse gifts</a><button type="button" class="btn btn-ghost btn-lg" data-act="open-search">${ic('search')}Search</button></div></div>
     <section class="sec">${secHead('Popular right now', '')}${gridHtml(IDX.query({ sort: 'popular', s: ['in', 'limited'], size: 4 }).items)}</section></div>`,
   };
+}
+
+/* ======================================================= tracking & pixels */
+// Our own visit counter (powers Dashboard › Traffic & funnel) + optional ad pixels.
+const SID = (() => {
+  let s = ss.get('bliss.sid', null);
+  if (!s) { s = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36)).replace(/-/g, '').slice(0, 24); ss.set('bliss.sid', s); }
+  return s;
+})();
+const VISIT = (() => {
+  const ref = document.referrer && !document.referrer.startsWith(location.origin) ? document.referrer : '';
+  const touch = detectSource(location.search, ref);
+  let v = ss.get('bliss.visit', null);
+  if (!v) { v = touch; ss.set('bliss.visit', v); }
+  // Order attribution: the last non-direct source within 30 days.
+  if (touch.channel !== 'direct') ls.set('bliss.src', { ...touch, at: Date.now() });
+  return v;
+})();
+function attribution(funnel = null) {
+  const s = ls.get('bliss.src', null);
+  const src = s && Date.now() - s.at < 30 * DAY ? s : VISIT;
+  return { channel: src.channel, campaign: src.campaign || '', funnel };
+}
+function beacon(body) {
+  try { fetch('/api/t', { method: 'POST', keepalive: true, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sid: SID, ...body }) }).catch(() => {}); } catch { /* ignore */ }
+}
+const addScript = (src) => { const s = document.createElement('script'); s.async = true; s.src = src; document.head.append(s); };
+function loadPixels() {
+  const t = C.settings.tracking || {};
+  try {
+    if (t.fbPixel && !window.fbq) {
+      const f = window.fbq = function () { f.callMethod ? f.callMethod.apply(f, arguments) : f.queue.push(arguments); };
+      window._fbq = f; f.push = f; f.loaded = true; f.version = '2.0'; f.queue = [];
+      addScript('https://connect.facebook.net/en_US/fbevents.js');
+      window.fbq('init', t.fbPixel);
+    }
+    if (t.ga4 && !window.gtag) {
+      window.dataLayer = window.dataLayer || [];
+      window.gtag = function () { window.dataLayer.push(arguments); };
+      window.gtag('js', new Date()); window.gtag('config', t.ga4, { send_page_view: false });
+      addScript(`https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(t.ga4)}`);
+    }
+    if (t.tiktok && !window.ttq) {
+      window.TiktokAnalyticsObject = 'ttq';
+      const q = window.ttq = [];
+      q.methods = ['page', 'track', 'identify', 'instances', 'debug', 'on', 'off', 'once', 'ready', 'alias', 'group', 'enableCookie', 'disableCookie'];
+      q.setAndDefer = (o, m) => { o[m] = function () { o.push([m].concat([].slice.call(arguments, 0))); }; };
+      for (const m of q.methods) q.setAndDefer(q, m);
+      q.instance = (id) => { const e = q._i[id] || []; for (const m of q.methods) q.setAndDefer(e, m); return e; };
+      q.load = (id, o) => { const u = 'https://analytics.tiktok.com/i18n/pixel/events.js'; q._i = q._i || {}; q._i[id] = []; q._i[id]._u = u; q._t = q._t || {}; q._t[id] = +new Date(); q._o = q._o || {}; q._o[id] = o || {}; addScript(`${u}?sdkid=${encodeURIComponent(id)}&lib=ttq`); };
+      q.load(t.tiktok);
+    }
+  } catch { /* a blocked pixel must never break the shop */ }
+}
+/** Standard ad events. items: [{ id, name, price, qty }] */
+function px(event, items = [], extra = {}) {
+  try {
+    const value = extra.value ?? items.reduce((s, x) => s + x.price * x.qty, 0);
+    const FB = { page: 'PageView', view: 'ViewContent', cart: 'AddToCart', checkout: 'InitiateCheckout', purchase: 'Purchase', lead: 'Lead' };
+    const GA = { page: 'page_view', view: 'view_item', cart: 'add_to_cart', checkout: 'begin_checkout', purchase: 'purchase', lead: 'generate_lead' };
+    const TT = { view: 'ViewContent', cart: 'AddToCart', checkout: 'InitiateCheckout', purchase: 'CompletePayment', lead: 'SubmitForm' };
+    if (window.fbq) {
+      if (event === 'page') window.fbq('track', 'PageView');
+      else window.fbq('track', FB[event], { content_ids: items.map((x) => x.id), content_type: 'product', contents: items.map((x) => ({ id: x.id, quantity: x.qty })), value, currency: 'BDT', ...(items[0] ? { content_name: items[0].name } : {}) }, extra.eventID ? { eventID: extra.eventID } : undefined);
+    }
+    if (window.gtag) {
+      if (event === 'page') window.gtag('event', 'page_view', { page_location: location.href, page_title: document.title });
+      else window.gtag('event', GA[event], { currency: 'BDT', value, ...(extra.eventID ? { transaction_id: extra.eventID } : {}), items: items.map((x) => ({ item_id: x.id, item_name: x.name, price: x.price, quantity: x.qty })) });
+    }
+    if (window.ttq) {
+      if (event === 'page') window.ttq.page();
+      else if (TT[event]) window.ttq.track(TT[event], { contents: items.map((x) => ({ content_id: x.id, content_name: x.name, quantity: x.qty, price: x.price })), content_type: 'product', value, currency: 'BDT' });
+    }
+  } catch { /* ignore */ }
+}
+const pxItem = (p, qty = 1, price = p.price) => ({ id: p.id, name: p.name, price, qty });
+
+/* ========================================================= countdown timers */
+function leftText(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000)), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const two = (n) => String(n).padStart(2, '0');
+  return `${d ? d + 'd ' : ''}${two(h)}:${two(m)}:${two(sec)}`;
+}
+function tickTimers() {
+  const now = Date.now();
+  for (const el of $$('[data-ends]')) {
+    const end = Date.parse(el.dataset.ends), left = end - now;
+    if (left > 0) { el.textContent = leftText(left); continue; }
+    el.removeAttribute('data-ends');
+    const host = el.closest('[data-timer-host]');
+    if (host?.dataset.timerHost === 'campaign') host.remove();
+    else if (host?.dataset.timerHost === 'sale') { host.remove(); refreshCatalog(true); }
+    else if (host?.dataset.timerHost === 'upsell') host.remove();
+    else if (host?.dataset.timerHost === 'hide') host.hidden = true;
+    else if (host?.dataset.timerHost === 'funnel-end' && current?.name === 'funnel') render(scrollY);
+  }
+}
+setInterval(() => { if (!document.hidden) tickTimers(); }, 1000);
+
+/* ========================================================== sales boosters */
+const B = () => C.settings.boosters || {};
+function campaignBar() {
+  const c = B().campaign;
+  $('.campaign')?.remove();
+  if (!c || (c.ends && Date.parse(c.ends) <= Date.now())) return;
+  const bar = document.createElement('div');
+  bar.className = 'campaign'; bar.dataset.timerHost = 'campaign';
+  bar.innerHTML = `<div class="container campaign-in">${ic('bolt')}<span class="cp-text">${esc(c.text)}</span>${c.ends ? `<span class="cp-timer">Ends in <b data-ends="${esc(c.ends)}">${leftText(Date.parse(c.ends) - Date.now())}</b></span>` : ''}${c.coupon ? `<button type="button" class="cp-btn" data-act="apply-coupon" data-code="${esc(c.coupon)}">${S.coupon?.code === c.coupon ? `${ic('check')}${esc(c.coupon)} applied` : `Use code ${esc(c.coupon)}`}</button>` : ''}${c.link ? `<a class="cp-link" href="${esc(c.link)}">Shop now ${ic('arrow-right')}</a>` : ''}</div>`;
+  $('.announce').before(bar);
+}
+ACTIONS['apply-coupon'] = async (t) => {
+  try {
+    const r = await api('/api/coupons/validate', { method: 'POST', body: { code: t.dataset.code } });
+    if (!r.ok) { toast(r.message, 'error'); return; }
+    S.coupon = r.coupon; ls.set('bliss.coupon', S.coupon); toast(`Code ${r.coupon.code} added to your bag`);
+    campaignBar(); refreshCartViews();
+  } catch (err) { toast(err.message, 'error'); }
+};
+function chatButton() {
+  const st = C.settings.store;
+  let fab = $('#chat-fab');
+  if (!B().chat || (!st.whatsapp && !st.messenger)) { fab?.remove(); return; }
+  if (!fab) { fab = document.createElement('div'); fab.id = 'chat-fab'; fab.className = 'chat-fab'; document.body.append(fab); }
+  const p = current?.name === 'product' ? IDX.bySlug.get(decodeURIComponent(location.pathname.split('/')[2] || '')) : null;
+  const text = p ? `Hi! I'm interested in "${p.name}" (${location.origin}/product/${p.slug}).` : `Hi ${st.name}! I have a question.`;
+  fab.innerHTML = `${st.messenger ? `<a class="fab fab-msg" href="${esc(st.messenger)}" target="_blank" rel="noopener" aria-label="Message us on Messenger">${ic('chat')}</a>` : ''}${st.whatsapp ? `<a class="fab fab-wa" href="https://wa.me/${esc(st.whatsapp)}?text=${encodeURIComponent(text)}" target="_blank" rel="noopener" aria-label="Chat with us on WhatsApp">${ic('whatsapp')}<span>Chat</span></a>` : ''}`;
+}
+const agoText = (ts) => { const m = Math.max(1, Math.round((Date.now() - ts) / 60000)); return m < 60 ? `${m} minute${m > 1 ? 's' : ''} ago` : m < 1440 ? `${Math.round(m / 60)} hour${Math.round(m / 60) > 1 ? 's' : ''} ago` : `${Math.round(m / 1440)} day${Math.round(m / 1440) > 1 ? 's' : ''} ago`; };
+function startProof() {
+  if (!B().proof || !(C.proof || []).length || ss.get('bliss.proofOff', false)) return;
+  let i = Math.floor(Math.random() * C.proof.length), shown = 0;
+  const tick = () => {
+    if (document.hidden || layer.el || shown >= 5 || ss.get('bliss.proofOff', false) || ['checkout', 'cart', 'order', 'account', 'funnel'].includes(current?.name)) return;
+    const e = C.proof[i++ % C.proof.length], p = IDX.byId.get(e.pid);
+    if (!p) return;
+    shown++;
+    $('.proof')?.remove();
+    const el = document.createElement('div');
+    el.className = 'proof'; el.setAttribute('role', 'status');
+    el.innerHTML = `<a href="/product/${p.slug}"><img src="${esc(p.img)}" alt="" width="52" height="64"><span><small>${e.name ? esc(e.name) : 'Someone'} in ${esc(e.city)} bought</small><b>${esc(p.name)}</b><small class="proof-t">${ic('check')}${agoText(e.at)}</small></span></a><button type="button" class="proof-x" aria-label="Hide these notes">${ic('close')}</button>`;
+    el.querySelector('.proof-x').addEventListener('click', () => { ss.set('bliss.proofOff', true); el.remove(); });
+    document.body.append(el);
+    requestAnimationFrame(() => el.classList.add('in'));
+    setTimeout(() => { el.classList.remove('in'); setTimeout(() => el.remove(), 400); }, 6500);
+  };
+  setTimeout(() => { tick(); setInterval(tick, 30000); }, 18000);
+}
+function startPopup() {
+  const P = B().popup;
+  if (!P || ls.get('bliss.popupDone', false) || Date.now() - ls.get('bliss.popupAt', 0) < 3 * DAY) return;
+  let done = false;
+  const show = () => {
+    if (done || layer.el || ['checkout', 'order', 'funnel', 'cart'].includes(current?.name)) return;
+    done = true; ls.set('bliss.popupAt', Date.now());
+    const phone = P.ask === 'phone';
+    openLayer('modal', `<button type="button" class="ibtn modal-x" data-act="close-layer" aria-label="Close">${ic('close')}</button>
+      <div class="popup"><span class="popup-ic">${ic('gift')}</span><h2>${esc(P.title)}</h2><p>${esc(P.text)}</p>
+      <form class="popup-form" data-form="popup" novalidate><label class="sr" for="pp-in">${phone ? 'Mobile number' : 'Email address'}</label><input id="pp-in" name="v" ${phone ? 'type="tel" inputmode="tel" placeholder="01XXXXXXXXX" autocomplete="tel"' : 'type="email" placeholder="you@email.com" autocomplete="email"'} required autofocus><button class="btn btn-primary btn-block" type="submit">${P.hasCoupon ? 'Get my discount' : 'Sign me up'}</button></form>
+      <button type="button" class="link-btn popup-no" data-act="close-layer">No thanks</button></div>`, { label: P.title, cls: 'popup-layer' });
+  };
+  setTimeout(show, Math.max(3, P.delay) * 1000);
+  if (P.exit && matchMedia('(hover: hover)').matches) document.addEventListener('mouseout', (e) => { if (!e.relatedTarget && e.clientY < 8) show(); });
+}
+FORMS.popup = async (f) => {
+  const P = B().popup, v = f.elements.v.value.trim();
+  const body = P.ask === 'phone' ? { phone: cleanPhone(v) } : { email: v };
+  if (P.ask === 'phone' && !PHONE_RE.test(cleanPhone(v))) { toast('Please enter a valid mobile number', 'error'); return; }
+  const b = f.querySelector('button'); b.disabled = true;
+  try {
+    const r = await api('/api/lead', { method: 'POST', body });
+    ls.set('bliss.popupDone', true); px('lead');
+    f.closest('.popup').innerHTML = `<span class="popup-ic ok">${ic('check')}</span><h2>You're in!</h2>${r.coupon ? `<p>Use this code at checkout:</p><button type="button" class="code big" data-act="copy" data-text="${esc(r.coupon)}">${esc(r.coupon)} ${ic('copy')}</button><button type="button" class="btn btn-primary btn-block" data-act="apply-coupon" data-code="${esc(r.coupon)}">Add it to my bag</button>` : '<p>Thanks! Watch out for our gift ideas and offers.</p>'}<button type="button" class="link-btn popup-no" data-act="close-layer">Continue shopping</button>`;
+  } catch (err) { toast(err.message, 'error'); b.disabled = false; }
+};
+/** "Frequently bought together" from real co-purchases (never invented). */
+function fbtHtml(p) {
+  if (!B().fbt || p.stock === 'out') return '';
+  const items = (C.fbt?.[p.id] || []).map((id) => IDX.byId.get(id)).filter((x) => x && x.stock !== 'out' && !x.options.length).slice(0, 2);
+  if (!items.length) return '';
+  const all = [p, ...items];
+  return `<section class="sec fbt card-pad" id="fbt"><h2 class="h3">Frequently bought together</h2>
+    <div class="fbt-row">${all.map((x, i) => `${i ? '<span class="fbt-plus" aria-hidden="true">+</span>' : ''}<label class="fbt-item"><input type="checkbox" data-fbt="${x.id}" checked ${i ? '' : 'disabled'}><span class="fbt-check"></span><img src="${esc(x.img)}" alt="" width="120" height="150" loading="lazy"><span class="fbt-name">${i ? '' : '<small>This item</small>'}${esc(x.name)}</span><b>${money(x.price)}</b></label>`).join('')}</div>
+    <div class="fbt-foot"><span>Total for all: <b id="fbt-total">${money(all.reduce((s, x) => s + x.price, 0))}</b></span><button type="button" class="btn btn-dark" id="fbt-add">${ic('bag')}Add selected to bag</button></div>
+    ${C.settings.bundleTiers.length ? '<p class="muted small">Your Mix & Match discount is added automatically in your bag.</p>' : ''}</section>`;
+}
+function bindFbt(root, p, sel) {
+  const box = $('#fbt', root); if (!box) return;
+  const upd = () => { const ids = [p.id, ...$$('[data-fbt]:checked:not([disabled])', box).map((i) => i.dataset.fbt)]; $('#fbt-total', box).textContent = money(ids.reduce((s, id) => s + (IDX.byId.get(id)?.price || 0), 0)); };
+  box.addEventListener('change', upd);
+  $('#fbt-add', box).addEventListener('click', () => {
+    if (p.options.some((o) => !sel[o.name])) { $('#buybox', root)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); toast(`Please choose a ${p.options.find((o) => !sel[o.name]).name.toLowerCase()} first`, 'error'); return; }
+    let n = addToCart(p, 1, { ...sel }, { silent: true }) ? 1 : 0;
+    for (const i of $$('[data-fbt]:checked:not([disabled])', box)) if (addToCart(IDX.byId.get(i.dataset.fbt), 1, {}, { silent: true })) n++;
+    if (n) { toast(`Added ${plural(n, 'item')} to your bag`, 'ok', { label: 'View bag', act: 'open-cart' }); }
+  });
+}
+
+/* =========================================================== funnel pages */
+const funnelCache = new Map();
+const hl = (s) => esc(s).replace(/\*(.+?)\*/g, '<em>$1</em>');
+const paras = (s) => esc(s || '').split(/\n{2,}/).filter(Boolean).map((x) => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
+function funnelDeadline(F) {
+  const d = F.deadline || {};
+  if (d.mode === 'fixed' && d.at) return { at: d.at, fixed: true, over: Date.parse(d.at) <= Date.now() };
+  if (d.mode === 'evergreen' && d.minutes) {
+    const k = `bliss.fdl.${F.id}`; let start = ls.get(k, 0);
+    if (!start) { start = Date.now(); ls.set(k, start); }
+    const at = new Date(start + d.minutes * 60_000).toISOString();
+    return Date.parse(at) > Date.now() ? { at, fixed: false, over: false } : null;
+  }
+  return null;
+}
+function viewFunnel(slug) {
+  let F = funnelCache.get(slug);
+  if (!F) { try { const d = JSON.parse($('#funnel')?.textContent || 'null'); if (d?.slug === slug) { F = d; funnelCache.set(slug, d); $('#funnel').remove(); } } catch { /* ignore */ } }
+  if (!F) {
+    return {
+      name: 'funnel', title: '', html: '<div class="container narrow"><div class="loading"><span class="spinner"></span></div></div>',
+      mount(root) {
+        api(`/api/funnels/${encodeURIComponent(slug)}`).then(({ funnel }) => { funnelCache.set(slug, funnel); if (root.isConnected) render(scrollY); })
+          .catch(() => { if (root.isConnected) root.innerHTML = viewNotFound('This offer has ended, but there are plenty more gifts to love.').html; });
+      },
+    };
+  }
+  const v = F.type === 'product' ? funnelProduct(F) : F.type === 'lead' ? funnelLead(F) : funnelCollection(F);
+  const mount = v.mount;
+  v.mount = function (root) { beacon({ step: 'funnel', fid: F.id }); mount?.call(this, root); };
+  return v;
+}
+function funnelShell(F, inner) {
+  const st = C.settings.store;
+  return `<div class="fn">
+    <div class="fn-bar"><div class="container fn-bar-in">${st.phone ? `<a href="tel:${esc(st.phone.replace(/[^+\d]/g, ''))}">${ic('phone')}<span>${esc(st.phone)}</span></a>` : ''}${st.whatsapp ? `<a href="https://wa.me/${esc(st.whatsapp)}" target="_blank" rel="noopener">${ic('whatsapp')}<span>WhatsApp</span></a>` : ''}</div></div>
+    ${inner}
+    <footer class="fn-foot container"><p>${ic('lock')} ${esc(st.name)} · ${esc(st.address)}</p><p><a href="/policies/returns">Returns</a> · <a href="/policies/privacy">Privacy</a> · <a href="/policies/terms">Terms</a> · <a href="/">Visit our shop</a></p></footer>
+  </div>`;
+}
+const fnVideo = (F) => (F.video ? `<div class="fn-video"><iframe src="https://www.youtube-nocookie.com/embed/${esc(F.video)}?rel=0" title="Video" loading="lazy" allow="accelerometer; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe></div>` : '');
+const fnBenefits = (F) => (F.benefits?.length ? `<ul class="ticks fn-ticks">${F.benefits.map((x) => `<li>${ic('check')}${esc(x)}</li>`).join('')}</ul>` : '');
+const fnFaq = (F) => (F.faq?.length ? `<section class="fn-sec container narrow"><h2>Questions</h2>${F.faq.map((x) => `<details class="faq-item"><summary>${esc(x.q)}${ic('plus')}</summary><p>${esc(x.a)}</p></details>`).join('')}</section>` : '');
+
+function funnelProduct(F) {
+  const p = F.product, P = C.settings.payments, dl = funnelDeadline(F);
+  const pk = F.packages, cmp = F.compare || 0;
+  const per = (x) => x.price / x.qty;
+  const best = pk.length > 1 ? pk.reduce((b, x, i) => (per(x) < per(pk[b]) ? i : b), 0) : -1;
+  const saved = ss.get('bliss.checkout', {});
+  const opt = p.options[0];
+  const startPrice = pk[0].price, startCmp = cmp ? cmp * pk[0].qty : 0;
+  const ended = dl?.fixed && dl.over;
+  const images = [F.image, ...(p.images || [p.img])].filter((x, i, a) => x && a.indexOf(x) === i).slice(0, 5);
+  const html = funnelShell(F, `
+  <section class="fn-hero container">
+    <div class="fn-media"><img src="${esc(images[0])}" alt="${esc(p.name)}" width="800" height="1000" fetchpriority="high">${images.length > 1 ? `<div class="fn-thumbs">${images.slice(1, 5).map((src) => `<img src="${esc(src)}" alt="" width="160" height="200" loading="lazy">`).join('')}</div>` : ''}</div>
+    <div class="fn-copy">
+      ${p.reviews ? `<a href="#fn-reviews" class="fn-rating">${stars(p.rating)}<b>${p.rating.toFixed(1)}</b><span>${plural(p.reviews, 'review')}</span></a>` : ''}
+      <h1>${hl(F.headline)}</h1>
+      ${F.subheadline ? `<p class="fn-sub">${esc(F.subheadline)}</p>` : ''}
+      <div class="fn-price"><strong>${money(startPrice)}</strong>${startCmp > startPrice ? `<s>${money(startCmp)}</s><span class="save">Save ${Math.round((1 - startPrice / startCmp) * 100)}%</span>` : ''}</div>
+      ${dl && !ended ? `<div class="fn-timer" data-timer-host="${dl.fixed ? 'funnel-end' : 'hide'}">${ic('clock')}<span>${dl.fixed ? 'Offer ends in' : 'This price is reserved for you for'}</span><b data-ends="${esc(dl.at)}">${leftText(Date.parse(dl.at) - Date.now())}</b></div>` : ''}
+      ${p.stock === 'limited' && p.left != null ? `<p class="fn-stock">${ic('alert')}Only <b>${p.left}</b> left in stock</p>` : ''}
+      ${ended ? `<div class="notice warn">${ic('info')}<p>This offer has ended. <a href="/product/${p.slug}">See the current price</a>.</p></div>` : p.stock === 'out' ? `<div class="notice warn">${ic('info')}<p>Sold out right now. <a href="/product/${p.slug}">Get notified when it's back</a>.</p></div>` : `<a class="btn btn-primary btn-lg btn-block fn-cta" href="#order">${esc(F.cta || 'Order now')} ${ic('arrow-right')}</a>`}
+      <div class="fn-trust"><span>${ic('cash')}Cash on delivery</span><span>${ic('truck')}Delivery across Bangladesh</span><span>${ic('shield')}Check before you pay</span></div>
+      ${fnBenefits(F)}
+    </div>
+  </section>
+  ${F.video ? `<section class="fn-sec container narrow">${fnVideo(F)}</section>` : ''}
+  ${F.body || p.highlights?.length ? `<section class="fn-sec container narrow prose">${paras(F.body)}${!F.body && p.highlights?.length ? `<ul class="ticks">${p.highlights.map((x) => `<li>${ic('check')}${esc(x)}</li>`).join('')}</ul>` : ''}</section>` : ''}
+  ${F.reviews?.length ? `<section class="fn-sec container" id="fn-reviews"><h2>What customers say</h2><div class="quotes">${F.reviews.map((r) => `<figure class="quote">${stars(r.rating)}<blockquote>${esc(r.text)}</blockquote><figcaption><b>${esc(r.name)}</b> · ${fmtDate(r.created)}</figcaption></figure>`).join('')}</div></section>` : ''}
+  ${ended || p.stock === 'out' ? '' : `<section class="fn-sec container fn-order-wrap" id="order">
+    <form class="fn-order card-pad" id="fn-form" novalidate>
+      <h2>Order now: pay when it arrives</h2>
+      ${pk.length > 1 ? `<div class="fn-pkgs" role="radiogroup" aria-label="Choose a package">${pk.map((x, i) => `<label class="fn-pkg${i === 0 ? ' on' : ''}"><input type="radio" name="pkg" value="${i}" ${i === 0 ? 'checked' : ''}><span class="fn-pkg-body"><b>${esc(x.label || `${x.qty} × ${p.name}`)}</b>${x.qty > 1 ? `<small>${money(per(x))} each</small>` : ''}</span><span class="fn-pkg-price"><b>${money(x.price)}</b>${cmp * x.qty > x.price ? `<s>${money(cmp * x.qty)}</s>` : ''}</span>${i === best && best > 0 ? '<span class="fn-best">Best value</span>' : ''}</label>`).join('')}</div>` : '<input type="hidden" name="pkg" value="0">'}
+      ${opt ? `<div class="field"><label for="fn-opt">${esc(opt.name)} *</label><select id="fn-opt" name="opt" required><option value="">Choose ${esc(opt.name.toLowerCase())}</option>${opt.values.map((x) => `<option>${esc(x)}</option>`).join('')}</select></div>` : ''}
+      <div class="grid-2"><div class="field"><label for="fn-name">Your name *</label><input id="fn-name" name="name" autocomplete="name" required maxlength="80" value="${esc(saved.name || '')}"></div><div class="field"><label for="fn-phone">Mobile number *</label><input id="fn-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="01XXXXXXXXX" required value="${esc(saved.phone || '')}"></div></div>
+      <div class="field"><label for="fn-line">Full address *</label><textarea id="fn-line" name="line" rows="2" maxlength="300" required placeholder="House, road, area, landmark" autocomplete="street-address">${esc(saved.line || '')}</textarea></div>
+      <div class="grid-2"><div class="field"><label for="fn-city">District *</label><select id="fn-city" name="city">${CITIES.map((c) => `<option ${c === (saved.city || 'Dhaka') ? 'selected' : ''}>${c}</option>`).join('')}<option value="__other">Other district</option></select><input name="cityOther" class="mt" placeholder="District name" hidden aria-label="District name"></div><div class="field"><label for="fn-area">Area / thana</label><input id="fn-area" name="area" maxlength="80" value="${esc(saved.area || '')}"></div></div>
+      ${F.bump ? `<label class="bump"><input type="checkbox" name="bump"><span class="bump-box"><span class="bump-check"></span><img src="${esc(F.bump.img)}" alt="" width="56" height="70"><span><b>${esc(F.bump.text || `Yes! Add ${F.bump.name}`)}</b><small>${esc(F.bump.name)} for just <b>${money(F.bump.price)}</b>${F.bump.was > F.bump.price ? ` <s>${money(F.bump.was)}</s>` : ''}</small></span></span></label>` : ''}
+      ${[P.cod, P.bkash, P.nagad].filter(Boolean).length > 1 ? `<div class="fn-pay">${P.cod ? `<label class="chip"><input type="radio" name="pay" value="cod" checked>Cash on delivery</label>` : ''}${P.bkash ? `<label class="chip"><input type="radio" name="pay" value="bkash" ${P.cod ? '' : 'checked'}>bKash</label>` : ''}${P.nagad ? `<label class="chip"><input type="radio" name="pay" value="nagad" ${P.cod || P.bkash ? '' : 'checked'}>Nagad</label>` : ''}</div>` : `<input type="hidden" name="pay" value="${P.cod ? 'cod' : P.bkash ? 'bkash' : 'nagad'}">`}
+      <div class="fn-mobile" hidden><p class="muted small">Send <b class="fn-amt"></b> to <b class="fn-num"></b> using <b class="fn-pm"></b> (Send Money), then enter the Transaction ID.</p><div class="field"><label for="fn-trx">Transaction ID *</label><input id="fn-trx" name="trx" autocomplete="off" maxlength="30"></div></div>
+      <div class="fn-sum" id="fn-sum"></div>
+      <div class="form-error" id="fn-error" role="alert" hidden></div>
+      <button class="btn btn-primary btn-lg btn-block" type="submit" id="fn-submit">${ic('lock')}<span>${esc(F.cta || 'Confirm order')}</span></button>
+      <p class="muted small center">We'll call you to confirm. ${F.guarantee ? esc(F.guarantee) : 'Check your parcel before you pay.'}</p>
+    </form>
+  </section>`}
+  ${fnFaq(F)}
+  ${F.guarantee ? `<section class="fn-sec container narrow"><div class="fn-guarantee">${ic('shield')}<p>${esc(F.guarantee)}</p></div></section>` : ''}
+  ${ended || p.stock === 'out' ? '' : `<div class="fn-sticky" id="fn-sticky"><div><b>${esc(p.name)}</b><span>${money(startPrice)}</span></div><a class="btn btn-primary" href="#order">${esc(F.cta || 'Order now')}</a></div>`}`);
+  return {
+    name: 'funnel', title: F.headline.replace(/\*/g, ''), html,
+    mount(root) {
+      px('view', [pxItem(p, 1, startPrice)]);
+      const f = $('#fn-form', root); if (!f) return;
+      const settings = funnelSettings(C.settings, F);
+      let t = null, started = false;
+      const val = () => {
+        const fd = Object.fromEntries(new FormData(f));
+        const city = fd.city === '__other' ? (fd.cityOther || '').trim() : fd.city;
+        return { ...fd, city, pkg: +fd.pkg || 0, bump: !!fd.bump };
+      };
+      const lines = (x) => [{ price: pk[x.pkg].price, qty: 1 }, ...(x.bump && F.bump ? [{ price: F.bump.price, qty: 1 }] : [])];
+      const items = (x) => [{ pid: p.id, qty: 1, pkg: x.pkg, options: opt ? { [opt.name]: x.opt } : {} }, ...(x.bump && F.bump ? [{ pid: F.bump.pid, offer: 'bump' }] : [])];
+      const recalc = () => {
+        const x = val(), zone = zoneOf(x.city);
+        t = computeTotals(lines(x), { settings, zone });
+        $$('.fn-pkg', f).forEach((l) => l.classList.toggle('on', l.querySelector('input').checked));
+        f.elements.cityOther.hidden = f.elements.city.value !== '__other';
+        const mob = $('.fn-mobile', f); mob.hidden = x.pay === 'cod';
+        if (x.pay !== 'cod') { $('.fn-amt', f).textContent = money(t.total); $('.fn-pm', f).textContent = x.pay === 'bkash' ? 'bKash' : 'Nagad'; $('.fn-num', f).textContent = x.pay === 'bkash' ? P.bkashNumber : P.nagadNumber; }
+        $('#fn-sum', f).innerHTML = `<div class="sum-row"><span>${esc(pk[x.pkg].label || p.name)}</span><b>${money(pk[x.pkg].price)}</b></div>${x.bump && F.bump ? `<div class="sum-row"><span>${esc(F.bump.name)}</span><b>${money(F.bump.price)}</b></div>` : ''}<div class="sum-row"><span>Delivery · ${zone === 'inside' ? 'inside Dhaka' : 'outside Dhaka'}</span><b>${t.delivery ? money(t.delivery) : 'Free'}</b></div><div class="sum-row total"><span>Total</span><b>${money(t.total)}</b></div>`;
+        $('#fn-submit span', f).textContent = `${F.cta || 'Confirm order'} · ${money(t.total)}`;
+        const st = $('#fn-sticky', root); if (st) st.querySelector('span').textContent = money(t.total);
+      };
+      const draft = debounce(() => {
+        const x = val();
+        if (!B().capture || !PHONE_RE.test(cleanPhone(x.phone))) return;
+        api('/api/checkout/draft', { method: 'POST', body: { sid: SID, name: x.name, phone: cleanPhone(x.phone), city: x.city, items: items(x), total: t?.total || 0, funnel: F.id, channel: attribution().channel } }).catch(() => {});
+      }, 1200);
+      f.addEventListener('focusin', () => { if (started) return; started = true; beacon({ step: 'funnel-checkout', fid: F.id }); beacon({ step: 'checkout' }); px('checkout', [pxItem(p, 1, pk[0].price)]); });
+      f.addEventListener('input', (e) => { e.target.closest('.field')?.classList.remove('invalid'); if (['phone', 'name', 'line'].includes(e.target.name)) { const x = val(); ss.set('bliss.checkout', { ...ss.get('bliss.checkout', {}), name: x.name, phone: x.phone, line: x.line, area: x.area, city: x.city }); draft(); } });
+      f.addEventListener('change', recalc);
+      f.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const x = val(), errs = [];
+        if (opt && !x.opt) errs.push(['opt', `Please choose a ${opt.name.toLowerCase()}`]);
+        if ((x.name || '').trim().length < 2) errs.push(['name', 'Please enter your name']);
+        if (!PHONE_RE.test(cleanPhone(x.phone))) errs.push(['phone', 'Enter a valid mobile number, e.g. 01712345678']);
+        if ((x.line || '').trim().length < 5) errs.push(['line', 'Please enter your full address']);
+        if ((x.city || '').trim().length < 2) errs.push(['cityOther', 'Please enter your district']);
+        if (x.pay !== 'cod' && !/^[A-Za-z0-9]{6,30}$/.test((x.trx || '').replace(/\s/g, ''))) errs.push(['trx', 'Please enter the Transaction ID']);
+        $$('.field.invalid', f).forEach((n) => n.classList.remove('invalid'));
+        if (errs.length) { errs.forEach(([n, m]) => markInvalid(f, n, m)); f.elements[errs[0][0]]?.focus(); toast(errs[0][1], 'error'); return; }
+        draft.cancel();
+        const btn = $('#fn-submit', f), errBox = $('#fn-error', f);
+        btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Placing your order…'; errBox.hidden = true;
+        try {
+          const r = await api('/api/orders', { method: 'POST', body: {
+            funnel: F.id, items: items(x), customer: { name: x.name, phone: cleanPhone(x.phone), email: '' },
+            address: { line: x.line, area: x.area, city: x.city, zone: zoneOf(x.city) }, delivery: { method: 'standard' },
+            payment: { method: x.pay, trxId: (x.trx || '').replace(/\s/g, '') }, expectedTotal: t.total, source: attribution(F.id),
+          } });
+          afterOrder(r, [pxItem(p, pk[x.pkg].qty, pk[x.pkg].price / pk[x.pkg].qty), ...(x.bump && F.bump ? [{ id: F.bump.pid, name: F.bump.name, price: F.bump.price, qty: 1 }] : [])]);
+        } catch (err) {
+          btn.disabled = false; btn.innerHTML = `${ic('lock')}<span></span>`; recalc();
+          errBox.hidden = false; errBox.textContent = err.message;
+          if (err.data?.field) markInvalid(f, { line: 'line', name: 'name', phone: 'phone', city: 'cityOther', trx: 'trx' }[err.data.field] || err.data.field, err.message);
+          if (err.status === 409) { funnelCache.delete(F.slug); await refreshCatalog(true); }
+          toast(err.message, 'error');
+        }
+      });
+      recalc();
+      const sticky = $('#fn-sticky', root);
+      if (sticky && 'IntersectionObserver' in window) {
+        const io = new IntersectionObserver((ents) => { const vis = ents.some((en) => en.isIntersecting); sticky.classList.toggle('show', !vis && scrollY > 300); });
+        io.observe(f); const cta = $('.fn-cta', root); if (cta) io.observe(cta);
+        addEventListener('scroll', debounce(() => { if (scrollY < 300) sticky.classList.remove('show'); }, 100), { passive: true });
+        this.unmount = () => io.disconnect();
+      }
+    },
+  };
+}
+function funnelLead(F) {
+  const html = funnelShell(F, `
+  <section class="fn-hero container fn-lead">
+    ${F.image ? `<div class="fn-media"><img src="${esc(F.image)}" alt="" width="800" height="1000" fetchpriority="high"></div>` : ''}
+    <div class="fn-copy">
+      <h1>${hl(F.headline)}</h1>
+      ${F.subheadline ? `<p class="fn-sub">${esc(F.subheadline)}</p>` : ''}
+      ${fnBenefits(F)}
+      <form class="fn-order card-pad" data-form="lead" data-slug="${esc(F.slug)}" novalidate>
+        <div class="field"><label for="ld-name">Your name</label><input id="ld-name" name="name" autocomplete="name" maxlength="80"></div>
+        <div class="field"><label for="ld-phone">Mobile number *</label><input id="ld-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="01XXXXXXXXX" required></div>
+        ${F.askEmail ? '<div class="field"><label for="ld-email">Email</label><input id="ld-email" name="email" type="email" autocomplete="email"></div>' : ''}
+        <button class="btn btn-primary btn-lg btn-block" type="submit">${esc(F.cta || 'Sign me up')}</button>
+        <p class="muted small center">${ic('lock')} We only use your number for this offer. No spam.</p>
+      </form>
+    </div>
+  </section>
+  ${F.video ? `<section class="fn-sec container narrow">${fnVideo(F)}</section>` : ''}
+  ${F.body ? `<section class="fn-sec container narrow prose">${paras(F.body)}</section>` : ''}
+  ${fnFaq(F)}`);
+  return { name: 'funnel', title: F.headline.replace(/\*/g, ''), html };
+}
+FORMS.lead = async (f) => {
+  const F = funnelCache.get(f.dataset.slug);
+  const d = Object.fromEntries(new FormData(f));
+  if (!PHONE_RE.test(cleanPhone(d.phone))) { markInvalid(f, 'phone', 'Enter a valid mobile number, e.g. 01712345678'); return; }
+  const b = f.querySelector('button[type=submit]'); b.disabled = true;
+  try {
+    const r = await api(`/api/funnels/${encodeURIComponent(f.dataset.slug)}/lead`, { method: 'POST', body: { ...d, phone: cleanPhone(d.phone) } });
+    px('lead');
+    f.outerHTML = `<div class="fn-order card-pad fn-done"><span class="done-ic">${ic('check')}</span><h2>${esc(F?.success || 'Thank you, you are in!')}</h2>${r.coupon ? `<button type="button" class="code big" data-act="copy" data-text="${esc(r.coupon)}">${esc(r.coupon)} ${ic('copy')}</button><button type="button" class="btn btn-dark btn-block" data-act="apply-coupon" data-code="${esc(r.coupon)}">Add the code to my bag</button>` : ''}<a class="btn btn-primary btn-lg btn-block" href="${esc(F?.ctaLink || '/shop')}">Start shopping ${ic('arrow-right')}</a></div>`;
+  } catch (err) { toast(err.message, 'error'); if (err.data?.field) markInvalid(f, err.data.field, err.message); b.disabled = false; }
+};
+function funnelCollection(F) {
+  const dl = funnelDeadline(F), ended = dl?.fixed && dl.over;
+  const items = (F.products || []).map((p) => IDX.byId.get(p.id)).filter(Boolean);
+  const html = `<div class="container">
+    <section class="fn-campaign">
+      <h1>${hl(F.headline)}</h1>
+      ${F.subheadline ? `<p class="fn-sub">${esc(F.subheadline)}</p>` : ''}
+      ${dl && !ended ? `<div class="fn-timer" data-timer-host="funnel-end">${ic('clock')}<span>Sale ends in</span><b data-ends="${esc(dl.at)}">${leftText(Date.parse(dl.at) - Date.now())}</b></div>` : ''}
+      ${ended ? `<div class="notice warn">${ic('info')}<p>This sale has ended. <a href="/offers">See current offers</a>.</p></div>` : F.coupon ? `<p class="fn-code">${ic('tag')}Code <b>${esc(F.coupon.code)}</b> ${F.coupon.type === 'percent' ? `(${F.coupon.value}% off${F.coupon.maxDiscount ? `, up to ${money(F.coupon.maxDiscount)}` : ''})` : `(${money(F.coupon.value)} off)`} is applied to your bag automatically${F.coupon.minSubtotal ? ` on orders over ${money(F.coupon.minSubtotal)}` : ''}.</p>` : ''}
+      ${fnBenefits(F)}
+    </section>
+    ${F.video ? `<section class="sec narrow">${fnVideo(F)}</section>` : ''}
+    <section class="sec">${items.length ? gridHtml(items, { eager: true }) : '<p class="muted">These gifts are sold out right now.</p>'}</section>
+    ${F.body ? `<section class="sec narrow prose">${paras(F.body)}</section>` : ''}
+  </div>${fnFaq(F)}`;
+  return {
+    name: 'campaign', title: F.headline.replace(/\*/g, ''), html,
+    mount() {
+      if (F.coupon && !ended && S.coupon?.code !== F.coupon.code) { S.coupon = F.coupon; ls.set('bliss.coupon', S.coupon); campaignBar(); }
+      ls.set('bliss.src', { ...attribution(), funnel: F.id, at: Date.now() });
+    },
+  };
+}
+/** Shared by the shop checkout and funnel pages once an order is placed. */
+function afterOrder(r, pxItems) {
+  const order = { ...r.order, offer: r.offer || null };
+  const mine = ls.get('bliss.orders', []);
+  ls.set('bliss.orders', [order, ...mine.filter((o) => o.id !== order.id)].slice(0, 20));
+  const sent = ls.get('bliss.pxSent', []);
+  if (!sent.includes(order.id)) { px('purchase', pxItems, { value: order.totals.total, eventID: order.id }); ls.set('bliss.pxSent', [order.id, ...sent].slice(0, 30)); }
+  const keep = ss.get('bliss.checkout', {}); ss.set('bliss.checkout', { name: keep.name, phone: keep.phone, email: keep.email, line: keep.line, area: keep.area, city: keep.city });
+  if (S.user) S.orders = [r.order, ...S.orders];
+  navigate(`/order/${order.id}`, { replace: true });
+  refreshCatalog(true);
+}
+function upsellHtml(o) {
+  const x = o.offer;
+  if (!x || o.upsold || Date.now() > x.until || o.status !== 'pending') return '';
+  return `<section class="upsell card-pad" id="upsell" data-timer-host="upsell">
+    <span class="up-kicker">${ic('gift')}One-time offer · ends in <b data-ends="${new Date(x.until).toISOString()}">${leftText(x.until - Date.now())}</b></span>
+    <div class="up-row"><img src="${esc(x.img)}" alt="" width="120" height="150"><div><h2>${esc(x.title)}</h2>${x.text ? `<p>${esc(x.text)}</p>` : ''}<p class="up-name">${esc(x.name)}</p><p class="up-price"><b>${money(x.price)}</b>${x.was > x.price ? `<s>${money(x.was)}</s><span class="save">Save ${money(x.was - x.price)}</span>` : ''}</p></div></div>
+    <button type="button" class="btn btn-primary btn-lg btn-block" id="up-yes">${ic('plus')}Yes, add it to my order</button>
+    <button type="button" class="link-btn up-no" id="up-no">No thanks</button>
+    <p class="muted small center">Comes in the same delivery. Pay ${money(x.price)} more on delivery. No extra delivery charge.</p>
+  </section>`;
 }
 
 /* ================================================================ search */
@@ -1650,7 +2148,7 @@ async function refreshCatalog(force = false) {
     if (!res.ok) return;
     const c = await res.json();
     if (c.v === C.v) return;
-    setCatalog(c); detailCache.clear();
+    setCatalog(c); detailCache.clear(); funnelCache.clear(); campaignBar();
     if (['home', 'shop', 'wishlist'].includes(current?.name) && !layer.el) render(scrollY);
     else if (layer.type === 'drawer') renderCartDrawer();
   } catch { /* offline: keep what we have */ }
@@ -1664,5 +2162,10 @@ addEventListener('storage', (e) => {
 
 /* =================================================================== go */
 hydrateShell();
+loadPixels();
+campaignBar();
 render(history.state?.y || 0);
 loadMe();
+beacon({ step: 'visit', channel: VISIT.channel, device: matchMedia('(max-width: 899px)').matches ? 'mobile' : 'desktop' });
+startProof();
+startPopup();

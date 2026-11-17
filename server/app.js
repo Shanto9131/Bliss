@@ -16,8 +16,20 @@ const SECURITY_HEADERS = {
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'X-Frame-Options': 'SAMEORIGIN',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
-  'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'",
 };
+/** The Content-Security-Policy only allows the ad pixels you have actually set up. */
+let cspCache = { key: null, value: '' };
+function csp(tracking = {}) {
+  const key = `${!!tracking.fbPixel}${!!tracking.ga4}${!!tracking.tiktok}`;
+  if (cspCache.key === key) return cspCache.value;
+  const script = ["'self'"], connect = ["'self'"];
+  if (tracking.fbPixel) { script.push('https://connect.facebook.net'); connect.push('https://www.facebook.com', 'https://connect.facebook.net'); }
+  if (tracking.ga4) { script.push('https://www.googletagmanager.com'); connect.push('https://www.googletagmanager.com', 'https://*.google-analytics.com', 'https://*.analytics.google.com'); }
+  if (tracking.tiktok) { script.push('https://analytics.tiktok.com'); connect.push('https://analytics.tiktok.com', 'https://*.tiktok.com'); }
+  const value = `default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src ${script.join(' ')}; font-src 'self'; connect-src ${connect.join(' ')}; frame-src https://www.youtube-nocookie.com; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'`;
+  cspCache = { key, value };
+  return value;
+}
 
 export async function createApp({ reset = false } = {}) {
   const serverless = !!process.env.VERCEL;
@@ -45,6 +57,7 @@ export async function createApp({ reset = false } = {}) {
       if (p !== null) { u.searchParams.delete('__path'); const qs = u.searchParams.toString(); req.url = '/' + p.replace(/^\/+/, '') + (qs ? `?${qs}` : ''); }
     }
     for (const k in SECURITY_HEADERS) res.setHeader(k, SECURITY_HEADERS[k]);
+    res.setHeader('Content-Security-Policy', csp(store.settings.tracking));
     if (PROD && isSecure(req)) res.setHeader('Strict-Transport-Security', 'max-age=15552000');
     let url, pathname;
     try { url = new URL(req.url, 'http://localhost'); pathname = decodeURIComponent(url.pathname); }

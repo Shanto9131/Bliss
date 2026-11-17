@@ -65,6 +65,9 @@ export class Renderer {
       return { status: 200, title: `${t.replace(/\b\w/g, (x) => x.toUpperCase())} gifts | ${brand}`, desc: `Thoughtful ${t} gift ideas, beautifully wrapped by ${brand}.` };
     } else if ((m = clean.match(/^\/policies\/([a-z]+)$/)) && POLICY[m[1]]) {
       return { status: 200, title: `${POLICY[m[1]]} | ${brand}`, desc: base.desc };
+    } else if ((m = clean.match(/^\/f\/([a-z0-9ঀ-৿-]+)$/))) {
+      const f = s.publicFunnel(m[1]);
+      if (f) return { status: 200, title: `${f.headline.replace(/\*/g, '')} | ${brand}`, desc: (f.subheadline || f.body || '').slice(0, 160), image: f.image || f.product?.img, funnel: f, noindex: true };
     } else if (/^\/order\/[A-Z0-9]{4,12}$/i.test(clean)) {
       return { status: 200, title: `Order confirmed | ${brand}`, desc: base.desc, noindex: true };
     }
@@ -83,11 +86,12 @@ export class Renderer {
       const ld = {
         '@context': 'https://schema.org', '@type': 'Product', name: p.name, description: p.desc, sku: p.id,
         image: p.images.map(abs), brand: { '@type': 'Brand', name: brand },
-        offers: { '@type': 'Offer', priceCurrency: 'BDT', price: p.price, url: origin + pathname, availability: `https://schema.org/${p.status === 'out' ? 'OutOfStock' : p.status === 'limited' ? 'LimitedAvailability' : 'InStock'}` },
+        offers: { '@type': 'Offer', priceCurrency: 'BDT', price: s.live(p).price, url: origin + pathname, availability: `https://schema.org/${p.status === 'out' ? 'OutOfStock' : p.status === 'limited' ? 'LimitedAvailability' : 'InStock'}` },
       };
       if (p.reviewCount) ld.aggregateRating = { '@type': 'AggregateRating', ratingValue: p.rating, reviewCount: p.reviewCount };
       h += `<script type="application/ld+json">${JSON.stringify(ld).replace(/</g, '\\u003c')}</script>`;
     }
+    if (r.funnel) h += `<script id="funnel" type="application/json">${JSON.stringify(r.funnel).replace(/</g, '\\u003c')}</script>`;
     return h;
   }
 

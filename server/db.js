@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { slugify, topK, computeTotals, ORDER_STATUSES } from '../public/assets/js/engine.js';
+import { slugify, computeTotals, ORDER_STATUSES, INACTIVE_STATUSES, funnelSettings } from '../public/assets/js/engine.js';
 import { HttpError } from './http.js';
 import { hashPassword, verifyPassword } from './auth.js';
-import { defaultSettings } from './seed.js';
+import { defaultSettings, demoCost, demoFunnels } from './seed.js';
 
 const STATUS_KEYS = new Set(ORDER_STATUSES.map((s) => s[0]));
 const PHONE_RE = /^01[3-9]\d{8}$/;
@@ -15,15 +15,27 @@ const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{2,}$/;
 const DAY = 86_400_000;
 const dhakaFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit' });
 export const dhakaDate = (ts) => dhakaFmt.format(new Date(ts));
+export const MANUAL_CHANNELS = ['phone', 'facebook', 'instagram', 'whatsapp', 'walk-in', 'other'];
+export const EXPENSE_CATEGORIES = ['ads', 'packaging', 'courier', 'salaries', 'rent', 'utilities', 'stock', 'software', 'other'];
+const STOCK_REASONS = new Set(['count', 'damaged', 'lost', 'gift', 'return', 'other']);
 
 const rid = (prefix) => `${prefix}_${crypto.randomBytes(5).toString('hex')}`;
 const str = (v, max = 200) => String(v ?? '').trim().slice(0, max);
-const int = (v, min, max, dflt) => { const n = Math.floor(Number(v)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
+const int = (v, min, max, dflt) => { const n = Math.floor(Number(v)); return v !== '' && v != null && Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
 const num = (v, min, max, dflt) => { const n = Number(v); return v !== '' && v != null && Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n * 100) / 100)) : dflt; };
 const bool = (v) => v === true || v === 'true' || v === 1 || v === '1' || v === 'on';
 const pickBool = (v, ex, dflt) => (v !== undefined ? bool(v) : ex !== undefined ? ex : dflt);
 const arr = (v) => (Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : []);
 const bad = (msg, field) => new HttpError(400, msg, field ? { field } : undefined);
+const url = (v) => { const s = str(v, 600); return /^(\/uploads\/|\/img\/|https:\/\/)/.test(s) ? s : ''; };
+const link = (v) => { const s = str(v, 300); return /^(\/(?!\/)|https:\/\/)/.test(s) ? s : ''; };
+/** "2026-11-20T23:59" (Dhaka local, from a datetime-local input) -> "2026-11-20T23:59:00+06:00". */
+const dhakaDateTime = (v) => {
+  const s = str(v, 40);
+  if (!s) return null;
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+  return m && Number.isFinite(Date.parse(`${m[1]}T${m[2]}:00+06:00`)) ? `${m[1]}T${m[2]}:00+06:00` : null;
+};
 export const normPhone = (p) => {
   let s = String(p ?? '').replace(/[\s\-()]/g, '');
   if (s.startsWith('+88')) s = s.slice(3); else if (s.startsWith('88') && s.length === 13) s = s.slice(2);
@@ -43,7 +55,9 @@ export class Store {
     this.dir = dataDir;
     this.file = path.join(dataDir, 'db.json');
     this.version = Date.now(); // catalog version: bumps whenever shoppers would see a change
-    this.timer = null; this.writing = false; this.dirty = false;
+    this.timer = null; this.lazyTimer = null; this.writing = false; this.dirty = false;
+    this._seen = { day: '', set: new Set() };
+    this._saleSig = '';
   }
 
   async load(seedFn, { reset = false } = {}) {
@@ -57,10 +71,33 @@ export class Store {
       }
     }
     if (!data) { data = await seedFn(); this.data = data; this.flushSync(); }
-    for (const k of ['products', 'categories', 'orders', 'users', 'reviews', 'coupons', 'messages', 'subscribers']) data[k] ||= [];
+    for (const k of ['products', 'categories', 'orders', 'users', 'reviews', 'coupons', 'messages', 'subscribers', 'funnels', 'leads', 'abandoned', 'expenses', 'stockLog']) data[k] ||= [];
+    data.customerNotes ||= {};
+    data.analytics ||= { days: {} };
+    data.analytics.days ||= {};
+    data.meta ||= { schema: 1 };
     data.settings = deepMerge(defaultSettings(), data.settings || {});
     this.data = data;
+    this.migrate();
     this.reindex();
+    this._saleSig = this._endedSales();
+    if (!this._sweep) { this._sweep = setInterval(() => this.sweepSales(), 60_000); this._sweep.unref?.(); }
+  }
+
+  /** One-time upgrades of older databases. */
+  migrate() {
+    const d = this.data;
+    if ((d.meta.schema || 1) < 2) {
+      // Demo products get an estimated purchase cost so the profit reports have something to show.
+      d.products.forEach((p, i) => {
+        if (p.demo && p.cost == null) p.cost = demoCost(p.price);
+        if (p.demo && !p.sku) p.sku = 'BL-' + String(i + 1).padStart(3, '0');
+      });
+      for (const o of d.orders) if (o.demo) for (const l of o.items) if (l.cost == null && l.kind !== 'box') l.cost = d.products.find((p) => p.id === l.pid)?.cost ?? null;
+      if (!d.funnels.length && d.products.some((p) => p.demo)) d.funnels = demoFunnels(d.products);
+      d.meta.schema = 2;
+      this.save();
+    }
   }
 
   reindex() {
@@ -73,6 +110,8 @@ export class Store {
     this.usersByPhone = new Map(d.users.map((u) => [u.phone, u]));
     this.usersByEmail = new Map(d.users.filter((u) => u.email).map((u) => [u.email, u]));
     this.coupons = new Map(d.coupons.map((c) => [c.code, c]));
+    this.funnels = new Map(d.funnels.map((f) => [f.id, f]));
+    this.funnelSlugs = new Map(d.funnels.map((f) => [f.slug, f]));
     this.reviewsByProduct = new Map();
     for (const r of d.reviews) {
       let list = this.reviewsByProduct.get(r.pid);
@@ -83,10 +122,14 @@ export class Store {
   }
 
   /* --------------------------------------------------------- persistence */
+  /** Coalesces writes: the first change schedules one write 150 ms later (never postponed). */
   save(catalogChanged = false) {
     if (catalogChanged) this.version = Math.max(Date.now(), this.version + 1);
-    clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.flush(), 150);
+    if (!this.timer) this.timer = setTimeout(() => { this.timer = null; this.flush(); }, 150);
+  }
+  /** For high-frequency, low-value changes (visit counters): written within 5 s. */
+  saveLazy() {
+    if (!this.timer && !this.lazyTimer) this.lazyTimer = setTimeout(() => { this.lazyTimer = null; this.flush(); }, 5000);
   }
   async flush() {
     if (this.writing) { this.dirty = true; return; }
@@ -103,41 +146,98 @@ export class Store {
     finally { this.writing = false; }
   }
   flushSync() {
-    clearTimeout(this.timer);
+    clearTimeout(this.timer); clearTimeout(this.lazyTimer); this.timer = null; this.lazyTimer = null;
     const tmp = this.file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(this.data));
     try { fs.renameSync(tmp, this.file); } catch { fs.copyFileSync(tmp, this.file); fs.rmSync(tmp, { force: true }); }
   }
 
+  /* ------------------------------------------------------ pricing & sales */
+  /** Current selling price: when a timed sale ends, the price goes back to the compare-at price. */
+  live(p, now = Date.now()) {
+    const onSale = p.compare > p.price;
+    if (onSale && p.saleEnds && now > Date.parse(p.saleEnds)) return { price: p.compare, compare: 0, ends: null };
+    return { price: p.price, compare: onSale ? p.compare : 0, ends: onSale && p.saleEnds ? p.saleEnds : null };
+  }
+  _endedSales() { const now = Date.now(); return this.data.products.filter((p) => p.saleEnds && p.compare > p.price && now > Date.parse(p.saleEnds)).map((p) => p.id).join(','); }
+  /** Runs every minute: when a timed sale ends, shoppers get fresh prices. */
+  sweepSales() { const sig = this._endedSales(); if (sig !== this._saleSig) { this._saleSig = sig; this.version = Math.max(Date.now(), this.version + 1); } }
+
   /* ------------------------------------------------------ public shapes */
   get settings() { return this.data.settings; }
+  publicBoosters() {
+    const b = this.data.settings.boosters, ok = (cfg) => {
+      const p = cfg?.enabled && this.products.get(cfg.pid);
+      return p && p.active && p.status !== 'out' && !(p.options || []).length ? { pid: p.id, price: cfg.price, title: cfg.title } : null;
+    };
+    return {
+      proof: !!b.proof, soldCount: !!b.soldCount, chat: !!b.chat, fbt: !!b.fbt, capture: !!b.capture,
+      popup: b.popup.enabled ? { delay: b.popup.delay, exit: !!b.popup.exit, ask: b.popup.ask, title: b.popup.title, text: b.popup.text, hasCoupon: !!(b.popup.coupon && this.checkCoupon(b.popup.coupon).ok) } : null,
+      bump: ok(b.bump), upsell: ok(b.upsell) ? { ...ok(b.upsell), minutes: b.upsell.minutes } : null,
+      campaign: b.campaign.enabled && b.campaign.text && (!b.campaign.ends || Date.parse(b.campaign.ends) > Date.now()) ? { text: b.campaign.text, ends: b.campaign.ends, coupon: b.campaign.coupon, link: b.campaign.link } : null,
+    };
+  }
   publicSettings() {
     const s = this.data.settings;
     return {
       store: s.store, announcements: s.announcements, delivery: s.delivery, bundleTiers: s.bundleTiers,
       giftWrapPrice: s.giftWrapPrice, hero: s.hero, stats: s.stats, builder: s.builder,
       payments: { cod: s.payments.cod, bkash: s.payments.bkash, nagad: s.payments.nagad, bkashNumber: s.payments.bkashNumber, nagadNumber: s.payments.nagadNumber, note: s.payments.note },
+      boosters: this.publicBoosters(), tracking: s.tracking,
     };
   }
-  publicProduct(p) {
+  publicProduct(p, recent) {
+    const lv = this.live(p);
     return {
-      id: p.id, slug: p.slug, name: p.name, cat: p.cat, price: p.price, compare: p.compare || 0,
+      id: p.id, slug: p.slug, name: p.name, cat: p.cat, price: lv.price, compare: lv.compare, ends: lv.ends,
       img: p.images[0] || '/img/placeholder.svg', img2: p.images[1] || null,
       stock: p.status, left: p.status === 'limited' && p.qty != null ? p.qty : null,
       tags: p.tags, gender: p.gender, rating: p.rating || 0, reviews: p.reviewCount || 0, sold: p.sold || 0,
       created: p.created, featured: !!p.featured, boxable: !!p.boxable, options: p.options || [],
-      keywords: p.keywords || '',
+      keywords: p.keywords || '', recent: recent?.get(p.id) || 0,
     };
   }
+  /** Real sales signals from orders: units sold in the last 7 days, recent purchases, bought-together pairs. */
+  salesSignals() {
+    const now = Date.now(), orders = this.data.orders, b = this.data.settings.boosters;
+    const recent = new Map(), proof = [], pairs = new Map();
+    for (let i = orders.length - 1; i >= 0; i--) {
+      const o = orders[i];
+      if (now - o.created > 120 * DAY) break;
+      if (INACTIVE_STATUSES.has(o.status)) continue;
+      const pids = new Set();
+      for (const l of o.items) {
+        if (l.kind === 'box') { for (const c of l.box.items) pids.add(c.pid); continue; }
+        pids.add(l.pid);
+        if (now - o.created <= 7 * DAY) recent.set(l.pid, (recent.get(l.pid) || 0) + l.qty * (l.pack || 1));
+        if (b.proof && proof.length < 12 && now - o.created <= 7 * DAY && this.products.get(l.pid)?.active && !proof.some((x) => x.at === o.created)) {
+          proof.push({ pid: l.pid, city: o.address.city, at: o.created, name: b.proofNames ? o.customer.name.split(' ')[0] : '' });
+        }
+      }
+      const list = [...pids];
+      for (const a of list) for (const c of list) if (a !== c) {
+        let m = pairs.get(a); if (!m) pairs.set(a, (m = new Map()));
+        m.set(c, (m.get(c) || 0) + 1);
+      }
+    }
+    const fbt = {};
+    for (const [a, m] of pairs) {
+      const top = [...m].filter(([c, n]) => n >= 2 && this.products.get(c)?.active).sort((x, y) => y[1] - x[1]).slice(0, 2).map(([c]) => c);
+      if (top.length) fbt[a] = top;
+    }
+    return { recent, proof, fbt };
+  }
   catalog() {
+    const sig = this.salesSignals();
     return {
       v: this.version,
       settings: this.publicSettings(),
       categories: [...this.data.categories].sort((a, b) => (a.sort ?? 99) - (b.sort ?? 99)),
-      products: this.data.products.filter((p) => p.active).map((p) => this.publicProduct(p)),
+      products: this.data.products.filter((p) => p.active).map((p) => this.publicProduct(p, sig.recent)),
       // Real, approved 5-star reviews for the homepage "loved by" section.
       reviews: this.data.reviews.filter((r) => r.approved && r.rating === 5 && r.text.length > 40 && this.products.get(r.pid)?.active)
         .sort((a, b) => b.created - a.created).slice(0, 6).map((r) => ({ name: r.name, text: r.text, rating: r.rating, pid: r.pid })),
+      proof: sig.proof, fbt: sig.fbt,
     };
   }
   productDetail(slugOrId) {
@@ -153,10 +253,22 @@ export class Store {
     };
   }
   publicOrder(o) {
-    const { adminNote, userId, ...rest } = o;
-    return rest;
+    const { adminNote, userId, source, manual, demo, ...rest } = o;
+    return {
+      ...rest,
+      items: o.items.map(({ cost, ...l }) => l),
+      courier: o.courier && (o.courier.name || o.courier.tracking) ? { name: o.courier.name, tracking: o.courier.tracking } : null,
+    };
   }
   publicUser(u) { return { id: u.id, name: u.name, phone: u.phone, email: u.email, address: u.address }; }
+
+  /* ---------------------------------------------------------- stock log */
+  _log(p, delta, reason, ref = '', note = '') {
+    if (!delta || p.qty == null) return;
+    const log = this.data.stockLog;
+    log.push({ id: rid('s'), at: Date.now(), pid: p.id, name: p.name, delta, after: p.qty, reason, ref, note: str(note, 200) });
+    if (log.length > 5000) log.splice(0, log.length - 5000);
+  }
 
   /* ------------------------------------------------------------ products */
   _autoStatus(p) {
@@ -186,6 +298,8 @@ export class Store {
     const qty = rawQty === null || rawQty === '' || rawQty === undefined ? null : int(rawQty, 0, 1_000_000, null);
     const rawLow = inp.lowStock !== undefined ? inp.lowStock : ex.lowStock;
     const lowStock = rawLow === null || rawLow === '' || rawLow === undefined ? null : int(rawLow, 0, 100_000, null);
+    const rawCost = inp.cost !== undefined ? inp.cost : ex.cost;
+    const cost = rawCost === null || rawCost === '' || rawCost === undefined ? null : num(rawCost, 0, 10_000_000, null);
     const options = (Array.isArray(inp.options) ? inp.options : ex.options || []).slice(0, 3).map((o) => ({
       name: str(o.name, 30),
       values: [...new Set(arr(o.values).map((v) => str(v, 30)).filter(Boolean))].slice(0, 30),
@@ -197,12 +311,15 @@ export class Store {
       desc: str(inp.desc ?? ex.desc, 6000), highlights, images,
       status: ['in', 'limited', 'out'].includes(inp.status) ? inp.status : ex.status || 'in',
       qty, lowStock, autoStock: pickBool(inp.autoStock, ex.autoStock, true),
+      cost, sku: str(inp.sku ?? ex.sku, 40), supplier: str(inp.supplier ?? ex.supplier, 80),
+      saleEnds: inp.saleEnds !== undefined ? dhakaDateTime(inp.saleEnds) : ex.saleEnds ?? null,
       tags: [...new Set(arr(inp.tags ?? ex.tags).map((t) => slugify(t)).filter((t) => t && t !== 'item'))].slice(0, 20),
       gender: ['her', 'him', 'unisex', 'kids'].includes(inp.gender) ? inp.gender : ex.gender || 'unisex',
       options, featured: pickBool(inp.featured, ex.featured, false),
       boxable: pickBool(inp.boxable, ex.boxable, false), active: pickBool(inp.active, ex.active, true),
       keywords: str(inp.keywords ?? ex.keywords, 300), updated: Date.now(),
     };
+    if (!compare) p.saleEnds = null;
     if (p.qty != null && (p.autoStock || p.qty === 0)) this._autoStatus(p);
     return p;
   }
@@ -210,23 +327,25 @@ export class Store {
     const p = this._normProduct(inp);
     Object.assign(p, { id: rid('p'), created: Date.now(), sold: 0, rating: 0, reviewCount: 0 });
     this.data.products.push(p); this.products.set(p.id, p); this.slugs.set(p.slug, p);
+    if (p.qty) this._log(p, p.qty, 'count', '', 'Opening stock');
     this.save(true);
     return p;
   }
   updateProduct(id, inp) {
     const ex = this.products.get(id);
     if (!ex) throw new HttpError(404, 'Product not found.');
-    const oldSlug = ex.slug;
+    const oldSlug = ex.slug, oldQty = ex.qty;
     const next = this._normProduct(inp, ex);
     Object.assign(ex, next);
     if (oldSlug !== ex.slug) { this.slugs.delete(oldSlug); this.slugs.set(ex.slug, ex); }
+    if (ex.qty !== oldQty) this._log(ex, (ex.qty ?? 0) - (oldQty ?? 0), 'count', '', 'Edited in product form');
     this.save(true);
     return ex;
   }
   duplicateProduct(id) {
     const ex = this.products.get(id);
     if (!ex) throw new HttpError(404, 'Product not found.');
-    return this.createProduct({ ...structuredClone(ex), name: ex.name + ' (copy)', slug: '', active: false });
+    return this.createProduct({ ...structuredClone(ex), name: ex.name + ' (copy)', slug: '', sku: '', active: false });
   }
   deleteProducts(ids) {
     const set = new Set(ids);
@@ -240,15 +359,50 @@ export class Store {
     const p = this.products.get(id);
     if (!p) throw new HttpError(404, 'Product not found.');
     if (qty !== undefined) {
+      const old = p.qty;
       p.qty = qty === null || qty === '' ? null : int(qty, 0, 1_000_000, p.qty);
       if (p.qty != null) p.autoStock = true; // typing a quantity = "manage the status for me"
       this._autoStatus(p);
+      if (p.qty !== old) this._log(p, (p.qty ?? 0) - (old ?? 0), 'count', '', 'Quantity typed in product list');
     }
     if (status !== undefined) {
       if (!['in', 'limited', 'out'].includes(status)) throw bad('Unknown stock status.');
       p.status = status;
       if (p.qty != null) { p.autoStock = false; if (status !== 'out' && p.qty === 0) p.qty = null; }
     }
+    p.updated = Date.now();
+    this.save(true);
+    return p;
+  }
+  /** Stock arrived from a supplier: adds to the quantity and updates the average cost. */
+  receiveStock(id, inp) {
+    const p = this.products.get(id);
+    if (!p) throw new HttpError(404, 'Product not found.');
+    const qty = int(inp.qty, 1, 1_000_000, 0);
+    if (!qty) throw bad('Enter how many units arrived.', 'qty');
+    const unitCost = num(inp.cost, 0, 10_000_000, null);
+    const before = p.qty ?? 0;
+    if (unitCost != null) p.cost = p.cost != null && before > 0 ? Math.round(((before * p.cost + qty * unitCost) / (before + qty)) * 100) / 100 : unitCost;
+    if (p.qty == null) p.autoStock = true;
+    p.qty = before + qty;
+    this._autoStatus(p);
+    this._log(p, qty, 'received', '', str(inp.note, 200) || (unitCost != null ? `@ ৳${unitCost} each` : ''));
+    p.updated = Date.now();
+    this.save(true);
+    return p;
+  }
+  /** Stock count / write-off: sets the exact quantity on the shelf. */
+  adjustStock(id, inp) {
+    const p = this.products.get(id);
+    if (!p) throw new HttpError(404, 'Product not found.');
+    const count = int(inp.count, 0, 1_000_000, null);
+    if (count == null) throw bad('Enter the quantity you counted.', 'count');
+    const reason = STOCK_REASONS.has(inp.reason) ? inp.reason : 'count';
+    const before = p.qty ?? 0;
+    if (p.qty == null) p.autoStock = true;
+    p.qty = count;
+    this._autoStatus(p);
+    this._log(p, count - before, reason, '', inp.note);
     p.updated = Date.now();
     this.save(true);
     return p;
@@ -318,21 +472,39 @@ export class Store {
     if (!ids.length) throw bad('Your gift box is empty. Add at least one item.');
     if (ids.length > box.capacity) throw bad(`The ${box.name} holds up to ${box.capacity} items.`);
     const qty = int(it.qty, 1, 10, 1);
-    const comps = []; let price = box.price + (wrap.price || 0);
+    const comps = []; let price = box.price + (wrap.price || 0); let cost = 0;
     for (const pid of ids) {
       const p = this.products.get(String(pid));
       if (!p || !p.active || !p.boxable || (p.options || []).length) throw new HttpError(409, 'An item in your gift box is no longer available.');
       if (p.status === 'out') throw new HttpError(409, `Sorry, "${p.name}" in your gift box just sold out.`);
       need.set(p.id, (need.get(p.id) || 0) + qty);
-      comps.push({ pid: p.id, name: p.name, price: p.price });
-      price += p.price;
+      const pr = this.live(p).price;
+      comps.push({ pid: p.id, name: p.name, price: pr });
+      price += pr;
+      cost = cost == null || p.cost == null ? null : cost + p.cost;
     }
     return {
-      kind: 'box', pid: 'box:' + box.id, name: `Custom ${box.name}`, slug: '', img: '/img/box.svg', price, qty, options: {},
+      kind: 'box', pid: 'box:' + box.id, name: `Custom ${box.name}`, slug: '', img: '/img/box.svg', price, cost, qty, options: {},
       box: { id: box.id, name: box.name, wrap: wrap.name, ribbon: ribbon.name, to: str(it.to, 60), from: str(it.from, 60), note: str(it.note, 300), items: comps },
     };
   }
-  placeOrder(inp, userId) {
+  _options(p, raw) {
+    const options = {};
+    for (const o of p.options || []) {
+      const v = raw?.[o.name];
+      if (!o.values.includes(v)) throw bad(`Please choose a ${o.name.toLowerCase()} for "${p.name}".`);
+      options[o.name] = v;
+    }
+    return options;
+  }
+  _offerProduct(cfg, pid, label) {
+    const p = cfg?.enabled && cfg.pid === String(pid) ? this.products.get(cfg.pid) : null;
+    if (!p || !p.active) throw new HttpError(409, `The ${label} offer is no longer available. Please remove it and try again.`);
+    if (p.status === 'out') throw new HttpError(409, `Sorry, "${p.name}" just sold out.`);
+    return p;
+  }
+  isBlocked(phone) { return !!this.data.customerNotes[phone]?.blocked; }
+  placeOrder(inp, userId, { admin = false } = {}) {
     const s = this.data.settings;
     const items = Array.isArray(inp.items) ? inp.items.slice(0, 40) : [];
     if (!items.length) throw bad('Your bag is empty.');
@@ -341,11 +513,12 @@ export class Store {
     if (name.length < 2) throw bad('Please enter your full name.', 'name');
     const phone = normPhone(c.phone);
     if (!PHONE_RE.test(phone)) throw bad('Please enter a valid mobile number, e.g. 01712345678.', 'phone');
+    if (!admin && this.isBlocked(phone)) throw new HttpError(403, 'We could not place this order online. Please call us and we will help you.');
     const email = str(c.email, 120).toLowerCase();
     if (email && !EMAIL_RE.test(email)) throw bad('Please enter a valid email address.', 'email');
     const a = inp.address || {};
     const line = str(a.line, 300);
-    if (line.length < 5) throw bad('Please enter the full delivery address.', 'line');
+    if (line.length < (admin ? 2 : 5)) throw bad('Please enter the full delivery address.', 'line');
     const city = str(a.city, 60);
     if (city.length < 2) throw bad('Please enter the city / district.', 'city');
     const area = str(a.area, 80);
@@ -356,8 +529,11 @@ export class Store {
       if (recipient.name.length < 2) throw bad("Please enter the recipient's name.", 'rname');
       if (!PHONE_RE.test(recipient.phone)) throw bad("Please enter the recipient's mobile number.", 'rphone');
     }
+    const funnel = inp.funnel ? this.funnels.get(str(inp.funnel, 40)) : null;
+    if (inp.funnel && (!funnel || !funnel.active)) throw new HttpError(409, 'This offer has ended. Please visit our shop for the latest prices.');
     const dlv = inp.delivery || {};
-    const method = dlv.method === 'express' ? 'express' : 'standard';
+    const pickup = admin && bool(inp.pickup);
+    const method = dlv.method === 'express' && !funnel ? 'express' : 'standard';
     if (method === 'express' && zone !== 'inside') throw bad(`Express delivery is available in ${s.delivery.expressAreas} only.`, 'method');
     const today = dhakaDate(Date.now());
     let date = /^\d{4}-\d{2}-\d{2}$/.test(dlv.date || '') ? dlv.date : null;
@@ -366,72 +542,126 @@ export class Store {
     const slot = ['morning', 'afternoon', 'evening'].includes(dlv.slot) ? dlv.slot : null;
     const gift = { wrap: bool(inp.gift?.wrap), message: str(inp.gift?.message, 300), hidePrice: bool(inp.gift?.hidePrice) };
     const pm = ['cod', 'bkash', 'nagad'].includes(inp.payment?.method) ? inp.payment.method : 'cod';
-    if (!s.payments[pm]) throw bad('That payment method is not available right now.', 'payment');
+    if (!admin && !s.payments[pm]) throw bad('That payment method is not available right now.', 'payment');
     const trxId = str(inp.payment?.trxId, 30).toUpperCase().replace(/\s/g, '');
-    if (pm !== 'cod' && !/^[A-Z0-9]{6,30}$/.test(trxId)) throw bad('Please enter the Transaction ID from your payment.', 'trx');
+    if (!admin && pm !== 'cod' && !/^[A-Z0-9]{6,30}$/.test(trxId)) throw bad('Please enter the Transaction ID from your payment.', 'trx');
 
     // Resolve every line from the database (never trust prices sent by the browser).
     const need = new Map(); const lines = [];
     for (const it of items) {
       if (it.kind === 'box') { lines.push(this._resolveBox(it, need)); continue; }
+      if (it.offer === 'bump') {
+        const cfg = funnel ? funnel.bump : s.boosters.bump;
+        const p = this._offerProduct(cfg, it.pid, 'add-on');
+        if (lines.some((l) => l.offer === 'bump')) continue;
+        need.set(p.id, (need.get(p.id) || 0) + 1);
+        lines.push({ kind: 'product', pid: p.id, name: p.name, slug: p.slug, img: p.images[0] || '', price: cfg.price, cost: p.cost ?? null, qty: 1, options: this._options(p, it.options), offer: 'bump' });
+        continue;
+      }
       const p = this.products.get(String(it.pid));
       if (!p || !p.active) throw new HttpError(409, 'An item in your bag is no longer available. Please remove it and try again.');
       if (p.status === 'out') throw new HttpError(409, `Sorry, "${p.name}" just sold out. Please remove it from your bag.`);
-      const qty = int(it.qty, 1, 20, 1);
-      const options = {};
-      for (const o of p.options || []) {
-        const v = it.options?.[o.name];
-        if (!o.values.includes(v)) throw bad(`Please choose a ${o.name.toLowerCase()} for "${p.name}".`);
-        options[o.name] = v;
+      const options = this._options(p, it.options);
+      if (funnel && it.pkg !== undefined) {
+        if (funnel.type !== 'product' || funnel.pid !== p.id) throw new HttpError(409, 'This offer has changed. Please reload the page.');
+        const pk = funnel.packages.length ? funnel.packages[int(it.pkg, 0, funnel.packages.length - 1, 0)] : { label: '', qty: 1, price: this.live(p).price };
+        const qty = int(it.qty, 1, 10, 1);
+        need.set(p.id, (need.get(p.id) || 0) + qty * pk.qty);
+        lines.push({ kind: 'product', pid: p.id, name: pk.label ? `${p.name} (${pk.label})` : p.name, slug: p.slug, img: p.images[0] || '', price: pk.price, cost: p.cost != null ? p.cost * pk.qty : null, qty, pack: pk.qty, options, offer: 'funnel' });
+        continue;
       }
+      const qty = int(it.qty, 1, admin ? 500 : 20, 1);
       need.set(p.id, (need.get(p.id) || 0) + qty);
-      lines.push({ kind: 'product', pid: p.id, name: p.name, slug: p.slug, img: p.images[0] || '', price: p.price, qty, options });
+      lines.push({ kind: 'product', pid: p.id, name: p.name, slug: p.slug, img: p.images[0] || '', price: this.live(p).price, cost: p.cost ?? null, qty, options });
     }
+    if (!lines.length) throw bad('Your bag is empty.');
     for (const [pid, q] of need) {
       const p = this.products.get(pid);
       if (p.qty != null && q > p.qty) throw new HttpError(409, p.qty > 0 ? `Only ${p.qty} left of "${p.name}". Please reduce the quantity.` : `Sorry, "${p.name}" just sold out.`);
     }
     let coupon = null;
-    const code = str(inp.coupon, 30).toUpperCase();
+    const code = funnel ? '' : str(inp.coupon, 30).toUpperCase();
     if (code) {
       const v = this.checkCoupon(code);
       if (!v.ok) throw new HttpError(409, v.message, { field: 'coupon' });
       coupon = v.coupon;
     }
-    const t = computeTotals(lines, { settings: s, coupon, zone, express: method === 'express', giftWrap: gift.wrap });
-    if (inp.expectedTotal != null && !(Math.abs(Number(inp.expectedTotal) - t.total) <= 0.5)) {
+    const priced = funnel ? funnelSettings(s, funnel) : s;
+    const t = computeTotals(lines, { settings: priced, coupon, zone, express: method === 'express', giftWrap: gift.wrap, noDelivery: pickup });
+    if (admin) {
+      const extra = Math.min(t.subtotal - t.discount, num(inp.extraDiscount, 0, 10_000_000, 0));
+      if (extra > 0) { t.discount += extra; t.total = Math.max(0, t.total - extra); t.discountLabel = t.discountLabel ? `${t.discountLabel} + special discount` : 'Special discount'; }
+    } else if (inp.expectedTotal != null && !(Math.abs(Number(inp.expectedTotal) - t.total) <= 0.5)) {
       throw new HttpError(409, 'Some prices changed while you were shopping. Please check the updated total and place the order again.', { totals: t });
     }
     // Commit: reserve stock, count sales.
+    const id = this._orderId();
     for (const [pid, q] of need) {
       const p = this.products.get(pid);
       p.sold = (p.sold || 0) + q;
-      if (p.qty != null) { p.qty = Math.max(0, p.qty - q); this._autoStatus(p); }
+      if (p.qty != null) { p.qty = Math.max(0, p.qty - q); this._autoStatus(p); this._log(p, -q, 'order', id); }
     }
     if (coupon && t.discountType === 'coupon') coupon.used = (coupon.used || 0) + 1;
     const now = Date.now();
+    const src = inp.source || {};
+    const channel = admin ? (MANUAL_CHANNELS.includes(src.channel) ? src.channel : 'phone') : str(src.channel, 20).toLowerCase().replace(/[^a-z0-9_-]/g, '') || 'direct';
+    const status = admin && STATUS_KEYS.has(inp.status) && !INACTIVE_STATUSES.has(inp.status) ? inp.status : 'pending';
     const order = {
-      id: this._orderId(), created: now, updated: now, userId: userId || null,
+      id, created: now, updated: now, userId: userId || null,
       customer: { name, phone, email }, recipient, address: { line, area, city, zone },
-      delivery: { method, date, slot }, gift, items: lines,
+      delivery: { method: pickup ? 'pickup' : method, date, slot }, gift, items: lines,
       totals: { count: t.count, subtotal: t.subtotal, discount: t.discount, discountLabel: t.discountLabel, delivery: t.delivery, wrap: t.wrap, total: t.total },
       coupon: t.discountType === 'coupon' ? coupon.code : null,
-      payment: { method: pm, trxId: pm === 'cod' ? '' : trxId, status: 'unpaid' },
-      status: 'pending', timeline: [{ status: 'pending', at: now, note: '' }],
-      note: str(inp.note, 500), adminNote: '',
+      payment: { method: pm, trxId: pm === 'cod' ? '' : trxId, status: admin && inp.paymentStatus === 'paid' ? 'paid' : 'unpaid' },
+      source: { channel, campaign: admin ? '' : str(src.campaign, 60), funnel: funnel?.id || null },
+      funnel: funnel?.id || null, courier: null, manual: admin || undefined,
+      status, timeline: [{ status: 'pending', at: now, note: admin ? 'Order created by the shop' : '' }, ...(status !== 'pending' ? [{ status, at: now, note: '' }] : [])],
+      note: str(inp.note, 500), adminNote: admin ? str(inp.adminNote, 1000) : '',
     };
     this.data.orders.push(order); this.orders.set(order.id, order);
+    this._convertDrafts(phone, order.id);
+    if (!admin) this._countOrder(order);
     this.save(true);
     return order;
   }
-  _restock(o, dir) { // dir = +1 returns stock (cancel), -1 reserves again (un-cancel)
+  /** The one-click "add this too" offer a shopper sees right after ordering (or null). */
+  upsellOffer(o) {
+    const cfg = o.funnel ? this.funnels.get(o.funnel)?.upsell : this.data.settings.boosters.upsell;
+    if (!cfg?.enabled || o.upsold || o.status !== 'pending' || o.payment.method !== 'cod') return null;
+    const minutes = cfg.minutes || 30, until = o.created + minutes * 60_000;
+    if (Date.now() > until) return null;
+    const p = this.products.get(cfg.pid);
+    if (!p || !p.active || p.status === 'out' || (p.options || []).length || (p.qty != null && p.qty < 1)) return null;
+    const lv = this.live(p);
+    return { pid: p.id, name: p.name, img: p.images[0] || '/img/placeholder.svg', slug: p.slug, price: cfg.price, was: Math.max(lv.price, lv.compare || 0), title: cfg.title || cfg.headline || 'Add this to your order', text: cfg.text || '', until };
+  }
+  acceptUpsell(id, phoneRaw) {
+    const o = this.orders.get(str(id, 20).toUpperCase());
+    const phone = normPhone(phoneRaw);
+    if (!o || phone !== o.customer.phone) throw new HttpError(404, 'Order not found.');
+    const offer = this.upsellOffer(o);
+    if (!offer) throw new HttpError(409, 'Sorry, this offer has expired.');
+    const p = this.products.get(offer.pid);
+    o.items.push({ kind: 'product', pid: p.id, name: p.name, slug: p.slug, img: p.images[0] || '', price: offer.price, cost: p.cost ?? null, qty: 1, options: {}, offer: 'upsell' });
+    o.totals.subtotal += offer.price; o.totals.count += 1; o.totals.total += offer.price;
+    o.upsold = true; o.updated = Date.now();
+    o.timeline.push({ status: o.status, at: Date.now(), note: `Added ${p.name} (one-time offer)` });
+    p.sold = (p.sold || 0) + 1;
+    if (p.qty != null) { p.qty = Math.max(0, p.qty - 1); this._autoStatus(p); this._log(p, -1, 'order', o.id, 'Upsell'); }
+    const day = this._day(dhakaDate(Date.now()));
+    day.up = (day.up || 0) + 1; day.upRev = (day.upRev || 0) + offer.price; day.rev = (day.rev || 0) + offer.price;
+    if (o.funnel) { const f = (day.f[o.funnel] ||= {}); f.up = (f.up || 0) + 1; f.rev = (f.rev || 0) + offer.price; }
+    this.save(true);
+    return o;
+  }
+  _restock(o, dir, reason) { // dir = +1 returns stock (cancel/return), -1 reserves again (restore)
     const adj = (pid, q) => {
       const p = this.products.get(pid); if (!p) return;
       p.sold = Math.max(0, (p.sold || 0) - dir * q);
-      if (p.qty != null) { p.qty = Math.max(0, p.qty + dir * q); this._autoStatus(p); }
+      if (p.qty != null) { p.qty = Math.max(0, p.qty + dir * q); this._autoStatus(p); this._log(p, dir * q, reason, o.id); }
     };
     for (const l of o.items) {
-      if (l.kind === 'box') for (const c of l.box.items) adj(c.pid, l.qty); else adj(l.pid, l.qty);
+      if (l.kind === 'box') for (const c of l.box.items) adj(c.pid, l.qty); else adj(l.pid, l.qty * (l.pack || 1));
     }
   }
   updateOrder(id, patch) {
@@ -440,13 +670,18 @@ export class Store {
     let stock = false;
     const note = str(patch.note, 300);
     if (patch.status && STATUS_KEYS.has(patch.status) && patch.status !== o.status) {
-      if (patch.status === 'cancelled') { this._restock(o, +1); stock = true; }
-      else if (o.status === 'cancelled') { this._restock(o, -1); stock = true; }
+      const was = INACTIVE_STATUSES.has(o.status), will = INACTIVE_STATUSES.has(patch.status);
+      if (!was && will) { this._restock(o, +1, patch.status === 'returned' ? 'return' : 'cancel'); stock = true; }
+      else if (was && !will) { this._restock(o, -1, 'restore'); stock = true; }
       o.status = patch.status;
       o.timeline.push({ status: o.status, at: Date.now(), note });
     } else if (note) o.timeline.push({ status: o.status, at: Date.now(), note });
     if (['paid', 'unpaid', 'refunded'].includes(patch.paymentStatus)) o.payment.status = patch.paymentStatus;
     if (patch.adminNote !== undefined) o.adminNote = str(patch.adminNote, 1000);
+    if (patch.courier) {
+      const cr = patch.courier;
+      o.courier = { name: str(cr.name, 40), tracking: str(cr.tracking, 60), cost: num(cr.cost, 0, 100_000, null) };
+    }
     o.updated = Date.now();
     this.save(stock);
     return o;
@@ -454,7 +689,7 @@ export class Store {
   deleteOrder(id) {
     const o = this.orders.get(id);
     if (!o) throw new HttpError(404, 'Order not found.');
-    if (o.status !== 'cancelled' && o.status !== 'delivered') this._restock(o, +1);
+    if (!INACTIVE_STATUSES.has(o.status) && o.status !== 'delivered') this._restock(o, +1, 'cancel');
     this.orders.delete(id);
     this.data.orders = this.data.orders.filter((x) => x.id !== id);
     this.save(true);
@@ -493,13 +728,13 @@ export class Store {
     };
     if (ex) { Object.assign(ex, c); if (newCode !== code) { this.coupons.delete(code); this.coupons.set(newCode, ex); } }
     else { this.data.coupons.push(c); this.coupons.set(newCode, c); }
-    this.save();
+    this.save(true);
     return ex || c;
   }
   deleteCoupon(code) {
     if (!this.coupons.delete(code)) throw new HttpError(404, 'Coupon not found.');
     this.data.coupons = this.data.coupons.filter((c) => c.code !== code);
-    this.save();
+    this.save(true);
   }
 
   /* -------------------------------------------------------------- reviews */
@@ -590,6 +825,20 @@ export class Store {
     }
     return out;
   }
+  setCustomer(phoneRaw, inp) {
+    const phone = normPhone(phoneRaw);
+    if (!PHONE_RE.test(phone)) throw bad('Invalid mobile number.');
+    const ex = this.data.customerNotes[phone] || {};
+    const next = {
+      note: str(inp.note ?? ex.note, 2000),
+      tags: [...new Set(arr(inp.tags ?? ex.tags).map((t) => str(t, 30)).filter(Boolean))].slice(0, 12),
+      blocked: pickBool(inp.blocked, ex.blocked, false), updated: Date.now(),
+    };
+    if (!next.note && !next.tags.length && !next.blocked) delete this.data.customerNotes[phone];
+    else this.data.customerNotes[phone] = next;
+    this.save();
+    return next;
+  }
 
   /* ------------------------------------------------- messages & newsletter */
   addMessage(inp) {
@@ -615,69 +864,267 @@ export class Store {
     const code = this.data.settings.newsletterCoupon;
     return code && this.checkCoupon(code).ok ? code : null;
   }
+  /** Popup / funnel lead: phone and/or email. Returns the coupon to reveal (if valid). */
+  addLead(inp, { funnel = null, coupon = '' } = {}) {
+    const name = str(inp.name, 80), phone = normPhone(inp.phone), email = str(inp.email, 120).toLowerCase();
+    const okPhone = PHONE_RE.test(phone), okEmail = EMAIL_RE.test(email);
+    if (!okPhone && !okEmail) throw bad(inp.email !== undefined && inp.phone === undefined ? 'Please enter a valid email address.' : 'Please enter a valid mobile number, e.g. 01712345678.', inp.phone !== undefined ? 'phone' : 'email');
+    if (okEmail && !this.data.subscribers.some((s) => s.email === email)) this.data.subscribers.push({ email, created: Date.now() });
+    const leads = this.data.leads;
+    const dup = leads.find((l) => l.funnel === (funnel?.id || null) && ((okPhone && l.phone === phone) || (okEmail && l.email === email)));
+    if (dup) { dup.name = name || dup.name; dup.updated = Date.now(); }
+    else {
+      leads.push({ id: rid('l'), funnel: funnel?.id || null, source: funnel ? 'funnel' : 'popup', name, phone: okPhone ? phone : '', email: okEmail ? email : '', created: Date.now() });
+      if (leads.length > 20_000) leads.splice(0, leads.length - 20_000);
+      const day = this._day(dhakaDate(Date.now()));
+      day.lead = (day.lead || 0) + 1;
+      if (funnel) { const f = (day.f[funnel.id] ||= {}); f.lead = (f.lead || 0) + 1; }
+    }
+    this.save();
+    return coupon && this.checkCoupon(coupon).ok ? coupon : null;
+  }
 
-  /* ----------------------------------------------------------- dashboard */
-  stats() {
-    const now = Date.now(), orders = this.data.orders;
-    const today = dhakaDate(now), month = today.slice(0, 7);
-    const series = new Map();
-    for (let i = 29; i >= 0; i--) series.set(dhakaDate(now - i * DAY), { revenue: 0, orders: 0 });
-    let revenue = 0, monthRevenue = 0, todayRevenue = 0, validCount = 0;
-    const byStatus = Object.fromEntries(ORDER_STATUSES.map(([k]) => [k, 0]));
-    const units = new Map();
-    for (const o of orders) {
-      byStatus[o.status] = (byStatus[o.status] || 0) + 1;
-      if (o.status === 'cancelled') continue;
-      validCount++;
-      const day = dhakaDate(o.created), total = o.totals.total;
-      revenue += total;
-      if (day.startsWith(month)) monthRevenue += total;
-      if (day === today) todayRevenue += total;
-      const b = series.get(day); if (b) { b.revenue += total; b.orders++; }
-      for (const l of o.items) {
-        const key = l.kind === 'box' ? l.pid : l.pid;
-        let u = units.get(key);
-        if (!u) units.set(key, (u = { pid: l.pid, name: l.name, img: l.img, units: 0, revenue: 0 }));
-        u.units += l.qty; u.revenue += l.price * l.qty;
+  /* ------------------------------------------------------------- funnels */
+  _normFunnel(inp, ex = {}) {
+    const type = ['product', 'lead', 'collection'].includes(inp.type ?? ex.type) ? inp.type ?? ex.type : 'product';
+    const name = str(inp.name ?? ex.name, 80);
+    if (name.length < 2) throw bad('Give the funnel a name (only you see it).', 'name');
+    let slug = slugify(str(inp.slug, 60) || ex.slug || name);
+    for (let n = 2; this.funnelSlugs.has(slug) && this.funnelSlugs.get(slug).id !== ex.id; n++) slug = `${slugify(str(inp.slug, 60) || name)}-${n}`;
+    const headline = str(inp.headline ?? ex.headline, 160);
+    if (headline.length < 3) throw bad('Write a headline for the page.', 'headline');
+    const offer = (o, exo = {}) => ({
+      enabled: pickBool(o?.enabled, exo.enabled, false), pid: str(o?.pid ?? exo.pid, 40), price: num(o?.price ?? exo.price, 0, 10_000_000, 0),
+      text: str(o?.text ?? exo.text, 200), headline: str(o?.headline ?? exo.headline, 120), minutes: int(o?.minutes ?? exo.minutes, 5, 1440, 30),
+    });
+    const f = {
+      ...ex, type, name, slug, headline,
+      active: pickBool(inp.active, ex.active, true),
+      subheadline: str(inp.subheadline ?? ex.subheadline, 400), image: url(inp.image ?? ex.image), cta: str(inp.cta ?? ex.cta, 60),
+      video: (() => { const v = str(inp.video ?? ex.video, 200); const m = v.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{11})/); return m ? m[1] : ''; })(),
+      body: str(inp.body ?? ex.body, 6000),
+      benefits: (Array.isArray(inp.benefits) ? inp.benefits : typeof inp.benefits === 'string' ? inp.benefits.split('\n') : ex.benefits || []).map((x) => str(x, 160)).filter(Boolean).slice(0, 12),
+      faq: (Array.isArray(inp.faq) ? inp.faq : ex.faq || []).map((x) => ({ q: str(x.q, 160), a: str(x.a, 800) })).filter((x) => x.q && x.a).slice(0, 12),
+      guarantee: str(inp.guarantee ?? ex.guarantee, 240),
+      pid: str(inp.pid ?? ex.pid, 40), compare: num(inp.compare ?? ex.compare, 0, 10_000_000, 0),
+      packages: (Array.isArray(inp.packages) ? inp.packages : ex.packages || []).map((x) => ({ label: str(x.label, 60), qty: int(x.qty, 1, 100, 1), price: num(x.price, 0, 10_000_000, NaN) })).filter((x) => Number.isFinite(x.price)).slice(0, 4),
+      deadline: { mode: ['none', 'fixed', 'evergreen'].includes(inp.deadline?.mode) ? inp.deadline.mode : ex.deadline?.mode || 'none', at: inp.deadline ? dhakaDateTime(inp.deadline.at) || '' : ex.deadline?.at || '', minutes: int(inp.deadline?.minutes ?? ex.deadline?.minutes, 5, 10_080, 30) },
+      freeDelivery: pickBool(inp.freeDelivery, ex.freeDelivery, false),
+      deliveryInside: inp.deliveryInside !== undefined ? num(inp.deliveryInside, 0, 100_000, null) : ex.deliveryInside ?? null,
+      deliveryOutside: inp.deliveryOutside !== undefined ? num(inp.deliveryOutside, 0, 100_000, null) : ex.deliveryOutside ?? null,
+      showReviews: pickBool(inp.showReviews, ex.showReviews, true),
+      bump: offer(inp.bump, ex.bump), upsell: offer(inp.upsell, ex.upsell),
+      coupon: str(inp.coupon ?? ex.coupon, 30).toUpperCase(), askEmail: pickBool(inp.askEmail, ex.askEmail, false),
+      success: str(inp.success ?? ex.success, 300), ctaLink: link(inp.ctaLink ?? ex.ctaLink),
+      pids: [...new Set(arr(inp.pids ?? ex.pids).map((x) => str(x, 40)).filter((x) => this.products.has(x)))].slice(0, 40),
+      updated: Date.now(),
+    };
+    if (f.type === 'product') {
+      const p = this.products.get(f.pid);
+      if (!p) throw bad('Choose the product this page sells.', 'pid');
+      if ((p.options || []).length > 1) throw bad('Landing pages support products with at most one option (e.g. size).', 'pid');
+    }
+    if (f.type === 'collection' && !f.pids.length) throw bad('Pick at least one product for the campaign page.', 'pids');
+    for (const k of ['bump', 'upsell']) {
+      const o = f[k];
+      if (!o.enabled) continue;
+      const p = this.products.get(o.pid);
+      if (!p) throw bad(`Choose a product for the ${k === 'bump' ? 'order bump' : 'upsell'}.`);
+      if ((p.options || []).length) throw bad(`The ${k === 'bump' ? 'order bump' : 'upsell'} product cannot have options (size, colour…).`);
+    }
+    if (f.coupon && !this.coupons.has(f.coupon)) throw bad(`Coupon ${f.coupon} does not exist. Create it in Coupons first.`, 'coupon');
+    return f;
+  }
+  saveFunnel(inp, id) {
+    const ex = id ? this.funnels.get(id) : null;
+    if (id && !ex) throw new HttpError(404, 'Funnel not found.');
+    const f = this._normFunnel(inp, ex || {});
+    if (ex) {
+      if (ex.slug !== f.slug) this.funnelSlugs.delete(ex.slug);
+      Object.assign(ex, f); this.funnelSlugs.set(ex.slug, ex);
+    } else {
+      Object.assign(f, { id: rid('f'), created: Date.now() });
+      this.data.funnels.push(f); this.funnels.set(f.id, f); this.funnelSlugs.set(f.slug, f);
+    }
+    this.save(true);
+    return ex || f;
+  }
+  duplicateFunnel(id) {
+    const ex = this.funnels.get(id);
+    if (!ex) throw new HttpError(404, 'Funnel not found.');
+    const { id: _i, created, demo, ...rest } = structuredClone(ex);
+    return this.saveFunnel({ ...rest, name: ex.name + ' (copy)', slug: ex.slug + '-copy', active: false });
+  }
+  deleteFunnel(id) {
+    const f = this.funnels.get(id);
+    if (!f) throw new HttpError(404, 'Funnel not found.');
+    this.funnels.delete(id); this.funnelSlugs.delete(f.slug);
+    this.data.funnels = this.data.funnels.filter((x) => x.id !== id);
+    this.save(true);
+  }
+  /** What a shopper's browser needs to draw a funnel page. */
+  publicFunnel(slug) {
+    const f = this.funnelSlugs.get(slug);
+    if (!f || !f.active) return null;
+    const pub = (pid) => { const p = this.products.get(pid); return p && p.active ? this.publicProduct(p) : null; };
+    const out = {
+      id: f.id, slug: f.slug, type: f.type, headline: f.headline, subheadline: f.subheadline, image: f.image, video: f.video, cta: f.cta,
+      body: f.body, benefits: f.benefits, faq: f.faq, guarantee: f.guarantee, deadline: f.deadline,
+      freeDelivery: f.freeDelivery, deliveryInside: f.deliveryInside, deliveryOutside: f.deliveryOutside,
+    };
+    if (f.type === 'product') {
+      const p = pub(f.pid);
+      if (!p) return null;
+      const d = this.productDetail(p.id);
+      out.product = { ...p, images: d.images, desc: d.desc, highlights: d.highlights };
+      out.compare = Math.max(f.compare || 0, p.compare || 0);
+      out.packages = f.packages.length ? f.packages : [{ label: '', qty: 1, price: p.price }];
+      out.reviews = f.showReviews ? d.reviewList.slice(0, 6) : [];
+      const offer = (o) => { const x = o.enabled && pub(o.pid); return x && x.stock !== 'out' && !x.options.length ? { pid: x.id, name: x.name, img: x.img, price: o.price, was: x.price, text: o.text } : null; };
+      out.bump = offer(f.bump);
+    } else if (f.type === 'lead') {
+      out.askEmail = f.askEmail; out.hasCoupon = !!(f.coupon && this.checkCoupon(f.coupon).ok); out.success = f.success; out.ctaLink = f.ctaLink;
+    } else {
+      out.products = f.pids.map(pub).filter(Boolean);
+      out.coupon = f.coupon && this.checkCoupon(f.coupon).ok ? this.publicCoupon(this.coupons.get(f.coupon)) : null;
+    }
+    return out;
+  }
+
+  /* ------------------------------------------------- abandoned checkouts */
+  saveDraft(inp) {
+    if (!this.data.settings.boosters.capture) return null;
+    const phone = normPhone(inp.phone);
+    if (!PHONE_RE.test(phone) || this.isBlocked(phone)) return null;
+    // A late save after the order went through is not an abandoned checkout.
+    const orders = this.data.orders, recent = Date.now() - 2 * 3600_000;
+    for (let i = orders.length - 1; i >= 0 && orders[i].created > recent; i--) if (orders[i].customer.phone === phone) return null;
+    const items = (Array.isArray(inp.items) ? inp.items : []).slice(0, 30).map((it) => (it.kind === 'box'
+      ? { kind: 'box', boxId: str(it.boxId, 30), wrapId: str(it.wrapId, 30), ribbonId: str(it.ribbonId, 30), items: arr(it.items).map((x) => str(x, 40)).slice(0, 20), qty: int(it.qty, 1, 10, 1), to: str(it.to, 60), from: str(it.from, 60), note: str(it.note, 300) }
+      : { pid: str(it.pid, 40), qty: int(it.qty, 1, 20, 1), options: Object.fromEntries(Object.entries(it.options || {}).slice(0, 3).map(([k, v]) => [str(k, 30), str(v, 30)])), ...(it.pkg !== undefined ? { pkg: int(it.pkg, 0, 3, 0) } : {}), ...(it.offer === 'bump' ? { offer: 'bump' } : {}) }))
+      .filter((it) => (it.kind === 'box' ? it.items.length : this.products.has(it.pid)));
+    if (!items.length) return null;
+    const sid = str(inp.sid, 40), now = Date.now();
+    const list = this.data.abandoned;
+    let d = list.find((x) => ['open', 'contacted'].includes(x.status) && (x.phone === phone || (sid && x.sid === sid)) && now - x.updated < 7 * DAY);
+    if (!d) {
+      d = { id: rid('a'), token: crypto.randomBytes(9).toString('base64url'), created: now, status: 'open' };
+      list.push(d);
+      if (list.length > 3000) list.splice(0, list.length - 3000);
+    }
+    Object.assign(d, {
+      sid, phone, name: str(inp.name, 80), email: str(inp.email, 120).toLowerCase(), city: str(inp.city, 60), items,
+      total: num(inp.total, 0, 10_000_000, 0), funnel: inp.funnel && this.funnels.has(inp.funnel) ? inp.funnel : null,
+      channel: str(inp.channel, 20).replace(/[^a-z0-9_-]/g, ''), updated: now,
+    });
+    this.saveLazy();
+    return d;
+  }
+  restoreDraft(token) {
+    const d = this.data.abandoned.find((x) => x.token === str(token, 30));
+    if (!d) return null;
+    d.restored = true; this.save();
+    return { items: d.items, name: d.name, phone: d.phone, email: d.email, city: d.city, funnel: d.funnel ? this.funnels.get(d.funnel)?.slug || null : null };
+  }
+  _convertDrafts(phone, orderId) {
+    for (const d of this.data.abandoned) {
+      if (d.phone === phone && ['open', 'contacted'].includes(d.status)) {
+        const recovered = d.status === 'contacted' || !!d.restored || Date.now() - d.updated > 3600_000;
+        Object.assign(d, { status: recovered ? 'recovered' : 'converted', orderId, convertedAt: Date.now() });
       }
     }
-    const stock = { in: 0, limited: 0, out: 0 };
-    const low = [];
-    for (const p of this.data.products) {
-      stock[p.status] = (stock[p.status] || 0) + 1;
-      if (p.status !== 'in') low.push(p);
-    }
-    low.sort((a, b) => (a.status === 'out' ? 0 : 1) - (b.status === 'out' ? 0 : 1) || (a.qty ?? 99) - (b.qty ?? 99));
-    return {
-      revenue, monthRevenue, todayRevenue, orders: orders.length, validOrders: validCount,
-      aov: validCount ? Math.round(revenue / validCount) : 0, byStatus,
-      products: this.data.products.length, stock,
-      lowStock: low.slice(0, 8).map((p) => ({ id: p.id, name: p.name, img: p.images[0], status: p.status, qty: p.qty })),
-      top: topK(units.values(), 5, (u) => u.units),
-      series: [...series].map(([date, v]) => ({ date, ...v })),
-      recent: orders.slice(-8).reverse().map((o) => ({ id: o.id, created: o.created, name: o.customer.name, total: o.totals.total, status: o.status, payment: o.payment.method })),
-      unread: this.data.messages.filter((m) => !m.read).length,
-      pendingReviews: this.data.reviews.filter((r) => !r.approved).length,
-      customers: new Set(orders.map((o) => o.customer.phone)).size,
-      subscribers: this.data.subscribers.length,
-    };
   }
-  customers() {
-    const m = new Map();
-    for (const o of this.data.orders) {
-      const k = o.customer.phone;
-      let c = m.get(k);
-      if (!c) m.set(k, (c = { phone: k, name: o.customer.name, email: o.customer.email, orders: 0, spent: 0, first: o.created, last: o.created, registered: false, city: o.address.city }));
-      c.orders++; c.name = o.customer.name; c.email = o.customer.email || c.email; c.city = o.address.city;
-      if (o.status !== 'cancelled') c.spent += o.totals.total;
-      c.last = Math.max(c.last, o.created);
+  updateDraft(id, inp) {
+    const d = this.data.abandoned.find((x) => x.id === id);
+    if (!d) throw new HttpError(404, 'Not found.');
+    if (['open', 'contacted', 'dismissed'].includes(inp.status)) { d.status = inp.status; if (inp.status === 'contacted') d.contactedAt = Date.now(); }
+    if (inp.note !== undefined) d.note = str(inp.note, 500);
+    this.save();
+    return d;
+  }
+
+  /* ------------------------------------------------------------ expenses */
+  saveExpense(inp, id) {
+    const ex = id ? this.data.expenses.find((x) => x.id === id) : null;
+    if (id && !ex) throw new HttpError(404, 'Expense not found.');
+    const amount = num(inp.amount, 0, 100_000_000, NaN);
+    if (!Number.isFinite(amount) || amount <= 0) throw bad('Enter the amount you spent.', 'amount');
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(inp.date || '') ? inp.date : dhakaDate(Date.now());
+    const e = { ...(ex || { id: rid('e'), created: Date.now() }), date, amount, category: EXPENSE_CATEGORIES.includes(inp.category) ? inp.category : 'other', note: str(inp.note, 200) };
+    if (ex) Object.assign(ex, e); else this.data.expenses.push(e);
+    this.save();
+    return ex || e;
+  }
+  deleteExpense(id) {
+    const n = this.data.expenses.length;
+    this.data.expenses = this.data.expenses.filter((x) => x.id !== id);
+    if (n === this.data.expenses.length) throw new HttpError(404, 'Expense not found.');
+    this.save();
+  }
+
+  /* ----------------------------------------------------------- analytics */
+  _day(date) {
+    const days = this.data.analytics.days;
+    let d = days[date];
+    if (!d) {
+      d = days[date] = { v: 0, pv: 0, atc: 0, ck: 0, ord: 0, rev: 0, src: {}, dev: {}, so: {}, sr: {}, f: {}, p: {} };
+      const keys = Object.keys(days);
+      if (keys.length > 400) for (const k of keys.sort().slice(0, keys.length - 400)) delete days[k];
     }
-    for (const u of this.data.users) {
-      let c = m.get(u.phone);
-      if (!c) m.set(u.phone, (c = { phone: u.phone, name: u.name, email: u.email, orders: 0, spent: 0, first: u.created, last: u.created, city: u.address?.city || '' }));
-      c.registered = true;
+    return d;
+  }
+  /** A visitor reached a step of the funnel. Each session counts once per step per day. */
+  track(ev) {
+    const sid = str(ev.sid, 40);
+    if (!/^[\w-]{8,40}$/.test(sid)) return;
+    const step = ev.step, today = dhakaDate(Date.now());
+    if (this._seen.day !== today || this._seen.set.size > 300_000) this._seen = { day: today, set: new Set() };
+    const key = (k) => { const id = `${sid}|${step}|${k}`; if (this._seen.set.has(id)) return false; this._seen.set.add(id); return true; };
+    const d = this._day(today);
+    if (step === 'visit') {
+      if (!key('')) return;
+      const ch = str(ev.channel, 20).replace(/[^a-z0-9_-]/g, '') || 'direct';
+      d.v++; d.src[ch] = (d.src[ch] || 0) + 1;
+      const dev = ev.device === 'mobile' ? 'mobile' : 'desktop'; d.dev[dev] = (d.dev[dev] || 0) + 1;
+    } else if (step === 'product') {
+      const pid = str(ev.pid, 40); if (!this.products.has(pid)) return;
+      if (key('')) d.pv++;
+      if (key(pid)) d.p[pid] = (d.p[pid] || 0) + 1;
+    } else if (step === 'cart') { if (key('')) d.atc++; }
+    else if (step === 'checkout') { if (key('')) d.ck++; }
+    else if (step === 'funnel' || step === 'funnel-checkout') {
+      const fid = str(ev.fid, 40); if (!this.funnels.has(fid) || !key(fid)) return;
+      const f = (d.f[fid] ||= {});
+      if (step === 'funnel') f.v = (f.v || 0) + 1; else f.ck = (f.ck || 0) + 1;
+    } else return;
+    this.saveLazy();
+  }
+  _countOrder(o) {
+    const d = this._day(dhakaDate(o.created)), ch = o.source?.channel || 'direct';
+    d.ord++; d.rev += o.totals.total;
+    d.so[ch] = (d.so[ch] || 0) + 1; d.sr[ch] = (d.sr[ch] || 0) + o.totals.total;
+    const bump = o.items.find((l) => l.offer === 'bump');
+    if (bump) { d.bump = (d.bump || 0) + 1; d.bumpRev = (d.bumpRev || 0) + bump.price; }
+    if (o.funnel) {
+      const f = (d.f[o.funnel] ||= {});
+      f.ord = (f.ord || 0) + 1; f.rev = (f.rev || 0) + o.totals.total;
+      if (bump) f.bump = (f.bump || 0) + 1;
     }
-    return [...m.values()].sort((a, b) => b.spent - a.spent || b.last - a.last);
+  }
+
+  /* ----------------------------------------------------------- dashboard */
+  /** Small numbers for the sidebar badges (fast: called on every page). */
+  counts() {
+    let pending = 0, attention = 0;
+    for (const o of this.data.orders) if (o.status === 'pending') pending++;
+    for (const p of this.data.products) if (p.status !== 'in') attention++;
+    const dayAgo = Date.now() - 7 * DAY;
+    return {
+      pending, attention,
+      reviews: this.data.reviews.filter((r) => !r.approved).length,
+      unread: this.data.messages.filter((m) => !m.read).length,
+      abandoned: this.data.abandoned.filter((a) => a.status === 'open' && a.updated > dayAgo).length,
+    };
   }
 
   /* ------------------------------------------------------------ settings */
@@ -701,10 +1148,50 @@ export class Store {
     if (inp.lowStockDefault !== undefined) s.lowStockDefault = int(inp.lowStockDefault, 0, 10_000, s.lowStockDefault);
     if (inp.reviewsAutoApprove !== undefined) s.reviewsAutoApprove = bool(inp.reviewsAutoApprove);
     if (inp.newsletterCoupon !== undefined) s.newsletterCoupon = str(inp.newsletterCoupon, 30).toUpperCase();
+    if (inp.vipSpend !== undefined) s.vipSpend = num(inp.vipSpend, 0, 100_000_000, s.vipSpend);
+    if (inp.photos) {
+      s.photos = {
+        fit: ['auto', 'pad', 'crop', 'off'].includes(inp.photos.fit) ? inp.photos.fit : s.photos.fit,
+        bg: ['auto', 'white', 'blur'].includes(inp.photos.bg) ? inp.photos.bg : s.photos.bg,
+      };
+    }
     if (inp.payments) {
       const p = inp.payments;
       s.payments = { ...s.payments, cod: pickBool(p.cod, s.payments.cod), bkash: pickBool(p.bkash, s.payments.bkash), nagad: pickBool(p.nagad, s.payments.nagad), bkashNumber: str(p.bkashNumber ?? s.payments.bkashNumber, 30), nagadNumber: str(p.nagadNumber ?? s.payments.nagadNumber, 30), note: str(p.note ?? s.payments.note, 300) };
       if (!s.payments.cod && !s.payments.bkash && !s.payments.nagad) s.payments.cod = true;
+    }
+    if (inp.costs) {
+      const c = inp.costs;
+      s.costs = { courierInside: num(c.courierInside, 0, 100_000, s.costs.courierInside), courierOutside: num(c.courierOutside, 0, 100_000, s.costs.courierOutside), packaging: num(c.packaging, 0, 100_000, s.costs.packaging), codPct: num(c.codPct, 0, 20, s.costs.codPct) };
+    }
+    if (inp.tracking) {
+      const t = inp.tracking;
+      const fb = str(t.fbPixel, 30), ga = str(t.ga4, 30).toUpperCase(), tt = str(t.tiktok, 40).toUpperCase();
+      if (fb && !/^\d{6,20}$/.test(fb)) throw bad('The Facebook Pixel ID is the long number from Events Manager (digits only).', 'tracking.fbPixel');
+      if (ga && !/^G-[A-Z0-9]{4,16}$/.test(ga)) throw bad('The Google Analytics ID looks like G-XXXXXXXXXX.', 'tracking.ga4');
+      if (tt && !/^[A-Z0-9]{10,30}$/.test(tt)) throw bad('The TikTok Pixel ID is letters and numbers only.', 'tracking.tiktok');
+      s.tracking = { fbPixel: fb, ga4: ga, tiktok: tt };
+    }
+    if (inp.boosters) {
+      const b = inp.boosters, ob = s.boosters;
+      const offer = (o, ex) => ({ enabled: pickBool(o?.enabled, ex.enabled, false), pid: str(o?.pid ?? ex.pid, 40), price: num(o?.price ?? ex.price, 0, 10_000_000, ex.price), title: str(o?.title ?? ex.title, 120), ...(ex.minutes !== undefined ? { minutes: int(o?.minutes ?? ex.minutes, 5, 1440, 30) } : {}) });
+      const next = {
+        proof: pickBool(b.proof, ob.proof), proofNames: pickBool(b.proofNames, ob.proofNames), soldCount: pickBool(b.soldCount, ob.soldCount),
+        chat: pickBool(b.chat, ob.chat), fbt: pickBool(b.fbt, ob.fbt), capture: pickBool(b.capture, ob.capture),
+        popup: b.popup ? { enabled: pickBool(b.popup.enabled, ob.popup.enabled), delay: int(b.popup.delay, 0, 600, ob.popup.delay), exit: pickBool(b.popup.exit, ob.popup.exit), ask: b.popup.ask === 'phone' ? 'phone' : 'email', title: str(b.popup.title ?? ob.popup.title, 100), text: str(b.popup.text ?? ob.popup.text, 240), coupon: str(b.popup.coupon ?? ob.popup.coupon, 30).toUpperCase() } : ob.popup,
+        bump: b.bump ? offer(b.bump, ob.bump) : ob.bump,
+        upsell: b.upsell ? offer(b.upsell, ob.upsell) : ob.upsell,
+        campaign: b.campaign ? { enabled: pickBool(b.campaign.enabled, ob.campaign.enabled), text: str(b.campaign.text ?? ob.campaign.text, 120), ends: b.campaign.ends !== undefined ? dhakaDateTime(b.campaign.ends) || '' : ob.campaign.ends, coupon: str(b.campaign.coupon ?? ob.campaign.coupon, 30).toUpperCase(), link: link(b.campaign.link ?? ob.campaign.link) || '/offers' } : ob.campaign,
+      };
+      for (const [k, label] of [['bump', 'checkout add-on'], ['upsell', 'after-order offer']]) {
+        const o = next[k];
+        if (!o.enabled) continue;
+        const p = this.products.get(o.pid);
+        if (!p) throw bad(`Choose a product for the ${label}.`);
+        if ((p.options || []).length) throw bad(`The ${label} product cannot have options (size, colour…). Pick another product.`);
+      }
+      for (const [code, label] of [[next.popup.coupon, 'popup'], [next.campaign.coupon, 'campaign bar']]) if (code && !this.coupons.has(code)) throw bad(`Coupon ${code} (${label}) does not exist. Create it in Coupons first.`);
+      s.boosters = next;
     }
     if (inp.hero) s.hero = { ...s.hero, ...text(inp.hero, ['eyebrow', 'title', 'subtitle', 'cta', 'ctaLink', 'cta2', 'cta2Link'], 240) };
     if (inp.stats) s.stats = { ...s.stats, ...text(inp.stats, ['customers', 'rating', 'delivered'], 20) };
@@ -724,11 +1211,14 @@ export class Store {
     d.orders = d.orders.filter((o) => !o.demo);
     d.reviews = d.reviews.filter((r) => !r.demo);
     d.messages = d.messages.filter((m) => !m.demo);
+    d.stockLog = d.stockLog.filter((x) => !String(x.ref).startsWith('BL') || this.orders.has(x.ref) && !this.orders.get(x.ref).demo);
     for (const p of d.products) if (p.demo) p.sold = 0;
     if (what === 'products') {
       const gone = new Set(d.products.filter((p) => p.demo).map((p) => p.id));
       d.products = d.products.filter((p) => !gone.has(p.id));
       d.reviews = d.reviews.filter((r) => !gone.has(r.pid));
+      d.funnels = d.funnels.filter((f) => !f.demo && !gone.has(f.pid));
+      d.stockLog = d.stockLog.filter((x) => !gone.has(x.pid));
     }
     this.reindex();
     this.save(true);

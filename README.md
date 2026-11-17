@@ -44,9 +44,19 @@ to launch.
 more → *In stock*. Every order reduces the quantity; a cancelled order puts it back.
 Leave the quantity empty if you prefer to set the status by hand.
 
-**Photos:** drag & drop phone photos straight into the product form. They are
-resized and converted to WEBP *in your browser* before upload, so a 5 MB photo becomes
-about 150 KB and the shop stays fast.
+**Photos:** drag & drop phone photos of **any size or shape** straight into the product form.
+In your browser, before upload, every photo is **auto-fitted** to the shop's frames (4:5 for
+products, square for categories) and converted to WEBP, so a 5 MB photo becomes about 150 KB,
+nothing is stretched and every grid lines up:
+- shape close to the frame → the edges are trimmed slightly;
+- very different shape (wide, tall, square) → the whole photo is kept and the empty space is filled
+  with the photo's own background colour (seamless for studio shots), a soft blurred copy, or white
+  (transparent PNGs get white);
+- small photos are not blown up beyond their real detail.
+
+Change the behaviour in **Settings › Store details › Photos**, where **Fit photos I already uploaded**
+re-fits older uploads in one click. Photos added by link (https://…) can't be changed; the shop
+still shows them whole on product pages.
 
 **Options** (ring size, letter, colour): add them in the product form. Customers must
 pick one before adding to the bag.
@@ -75,17 +85,75 @@ pick one before adding to the bag.
 - Mobile-first design with a bottom tab bar; SEO tags, Google product data and a sitemap
 
 **For you (dashboard)**
-- Overview: revenue this month, orders, average order value, a 30-day revenue chart,
-  stock health, recent orders, best sellers
-- Products (above), categories, customers
-- Orders: filter by status, search, one-click workflow
-  (Confirm → Packing → Out for delivery → Delivered), mark paid, notes customers see
-  when tracking, private notes, **printable invoice & packing slip**, CSV export
+- Overview with a **date range** (today, 7/30/90 days, this/last month, this year, custom) and
+  the change vs the previous period: sales, **gross profit & margin**, average order, new vs
+  returning customers, **conversion rate**, cancel/return rate; a **To do now** list (orders to
+  confirm, bKash/Nagad payments to verify, parcels out for delivery and the cash to collect,
+  overdue deliveries, abandoned carts, products to reorder); sales/profit/orders/visitors chart;
+  shop funnel; sales by source, category, payment and city; best sellers with profit; stock value
+- Products (above) with **cost price, SKU, supplier** and an optional **sale end time**
+  (countdown; the price returns to normal automatically)
+- **Inventory**: units on hand, stock value at cost and at selling price, sales speed,
+  days of stock left, suggested reorder quantity, products that are not selling, **receive stock**
+  (updates the average cost), **stock counts / write-offs**, and a full **stock history** for every
+  product (orders, cancels, returns, deliveries). CSV export
+- Orders: filter by status, payment, source and date, search by tracking number, **bulk update &
+  bulk packing slips**, one-click workflow (Confirm → Packing → Out for delivery → Delivered, or
+  **Returned** when a parcel comes back), **courier & tracking number** (shown to the customer),
+  real profit per order, a **fraud check** from the customer's past orders (returned / cancelled),
+  mark paid or refunded, printable invoice & packing slip, CSV export
+- **New order** for phone, Facebook, Instagram, WhatsApp and walk-in orders (finds returning
+  customers by phone, applies stock and reports like an online order)
+- Customers: **segments** (VIP, repeat, new, lapsed, risky, blocked), delivery success rate,
+  lifetime value, a profile with private notes and tags, and **blocking** of fake-order numbers. CSV export
+- **Abandoned carts**: shoppers who typed their phone at checkout but did not order, with a
+  one-click WhatsApp message that restores their bag (plus an optional coupon) and recovery stats
+- **Funnels** (landing pages for ads, at `/f/your-link`), see section 3a
+- **Traffic & funnel**: visitors, conversion, traffic sources (Facebook, Instagram, Google,
+  TikTok… from ad links and referrers), devices, product views vs sales, results per funnel
+- **Sales boosters**, see section 3b
+- **Profit & expenses**: profit & loss statement (sales − product cost − courier − packaging −
+  COD fees − return losses − expenses), profit by product (CSV), daily breakdown, expense log
 - Reviews (approve before they show), coupons, messages (contact, corporate, restock
   requests), newsletter subscribers (CSV export)
 - Gift Box Builder settings (boxes, wraps, ribbons)
 - Settings: store details, social links, announcement bar, delivery charges & express,
   Mix & Match tiers, gift-wrap price, payment numbers, homepage text, password, demo data
+
+### 3a. Funnels (Dashboard › Funnels)
+
+A funnel is a focused page with one goal and no menus, made for ad traffic. Each one has its own
+link (`/f/...`) to put in your Facebook, Instagram or TikTok ad.
+
+| Type | What it does |
+|---|---|
+| **Product landing page** | One product, headline, photos/YouTube video, benefits, reviews, FAQ, guarantee and a quick cash-on-delivery order form on the same page. Optional **price packages** (e.g. 1 for ৳990, 2 for ৳1,780), a countdown (a personal timer per visitor, or a fixed end date), its own delivery charge, an **order bump** (tick-box add-on in the form) and a **one-click upsell** after the order (added to the same COD delivery). |
+| **Lead capture / giveaway** | Collects phone numbers (and emails) and reveals a coupon. Leads appear in Subscribers & leads (CSV export). |
+| **Campaign sale page** | A timed sale with hand-picked products and a coupon that is applied to the bag automatically. |
+
+Every funnel shows its visitors, orders or leads, conversion rate, sales and how many took the bump
+and upsell. Add `?utm_source=facebook&utm_campaign=your-campaign` to ad links to see results per campaign.
+Two sample funnels are included with the demo data.
+
+### 3b. Sales boosters (Dashboard › Sales boosters)
+
+All switchable, all based on real data (nothing is faked):
+- **Recent purchase notes** ("Someone in Dhaka bought … 2 hours ago", from real orders of the last 7 days)
+- **"Sold in the last 7 days"** on product pages (shown at 3+), **sale countdowns**
+- **Frequently bought together** from products customers actually bought together
+- **Floating WhatsApp / Messenger** button (with the product name pre-filled)
+- **Offer pop-up** (email or phone for a coupon, once every 3 days, also on exit on computers)
+- **Checkout add-on** (order bump) and **after-order one-click upsell**
+- **Sale campaign bar** with countdown and one-tap coupon
+- **Abandoned checkout capture** (see Abandoned carts)
+- **Ad pixels**: Facebook (Meta) Pixel, Google Analytics 4 and TikTok Pixel. Page view, product view,
+  add to cart, checkout, purchase (with value, de-duplicated by order ID) and lead events are sent
+  automatically. The security policy only allows a pixel's scripts once you add its ID.
+
+**Accurate numbers:** sales exclude cancelled, returned and refunded orders. Profit uses the cost price
+saved on each order line when it was ordered, the real courier charge where you entered it (otherwise the
+defaults in Settings › Costs & profit), packaging and the COD fee. Visitor counting ignores bots and counts
+each visitor once per step per day. Orders are counted on the server, so ad blockers cannot hide them.
 
 ---
 
@@ -175,7 +243,9 @@ Set these in Vercel › Project › Settings › Environment Variables:
 
 ## 6. Your data & backups
 
-- `data/db.json`: products, orders, customers, settings (a `db.json.bak` copy is made at every start)
+- `data/db.json`: products, orders, customers, funnels, leads, expenses, stock history, visitor
+  counts and settings (a `db.json.bak` copy is made at every start). Older databases are upgraded
+  automatically on start.
 - `uploads/`: product photos you uploaded
 
 **Back up both folders regularly** (for example, a daily copy to Google Drive).
@@ -199,7 +269,7 @@ To start over with fresh demo data: stop the server and run `npm run reset`
 
 ```
 server.js              Web server (no dependencies)
-server/                Database, API, auth, page rendering, static files, demo data & art
+server/                Database, API, reports (profit, inventory, analytics), auth, rendering, demo data
 public/index.html      Shop page shell        public/admin/index.html   Dashboard shell
 public/assets/js/      engine.js (search & totals) · store.js (shop) · admin.js (dashboard)
 public/assets/css/     store.css · admin.css
