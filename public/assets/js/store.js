@@ -253,6 +253,87 @@ const prefetchDetail = (slug) => { if (!detailCache.has(slug)) detailCache.set(s
 document.addEventListener('pointerover', (e) => { const a = e.target.closest?.('a[href^="/product/"]'); if (a) prefetchDetail(decodeURIComponent(a.getAttribute('href').split('/')[2])); }, { passive: true });
 document.addEventListener('touchstart', (e) => { const a = e.target.closest?.('a[href^="/product/"]'); if (a) prefetchDetail(decodeURIComponent(a.getAttribute('href').split('/')[2])); }, { passive: true });
 
+/* ===================================================== category backdrop */
+// A faint, living scene behind each category page: a soft glow in the category's colour and its
+// motifs drifting upward in three depth layers. Each motif has its own behaviour: rings spin,
+// watch hands tick, candle flames flicker, jhumkas and keychains swing, petals tumble down...
+// [behaviour class, svg body]. Classes inside: fl = tinted shape, au = gold, thin = fine line.
+const MOTIFS = {
+  ring: ['a-spin', '<path class="fl" fill-rule="evenodd" d="M32 27a15 15 0 1 1 0 30a15 15 0 1 1 0-30zm0 3.5a11.5 11.5 0 1 0 0 23a11.5 11.5 0 1 0 0-23z"/><path class="au" d="M23 20l4.5-6h9l4.5 6-9 10z"/><path class="thin" d="M23 20h18M27.5 14l4.5 6 4.5-6M32 20v10"/><path class="glint" d="M47 6l1.2 3.3 3.3 1.2-3.3 1.2L47 15l-1.2-3.3-3.3-1.2 3.3-1.2z"/>'],
+  giftbox: ['a-float', '<rect class="fl" x="12" y="30" width="40" height="26" rx="2.5"/><path class="au" d="M29 30h6v26h-6z"/><g class="lid"><rect class="fl" x="9" y="21" width="46" height="10" rx="2.5"/><path class="au" d="M29 21h6v10h-6zM32 21c-3-7-13-10-14-4-.8 4.5 9 4 14 4s14.8.5 14-4c-1-6-11-3-14 4z"/></g>'],
+  earrings: ['a-swing', '<path d="M28 9a5 5 0 1 1 4 6v4"/><circle class="au" cx="32" cy="22" r="3.2"/><path class="fl" d="M17 45c0-9.5 6.7-17 15-17s15 7.5 15 17z"/><path class="thin" d="M17 45h30M21 38h22"/><circle class="au" cx="20" cy="50" r="1.8"/><circle class="au" cx="26" cy="52" r="1.8"/><circle class="au" cx="32" cy="53" r="1.8"/><circle class="au" cx="38" cy="52" r="1.8"/><circle class="au" cx="44" cy="50" r="1.8"/>'],
+  necklace: ['a-float', '<path class="beads" d="M9 6c0 22 10 34 23 34S55 28 55 6"/><g class="pend"><path d="M32 40v4"/><path class="au" d="M32 59c-6.5-5-9.5-8.2-9.5-11.5a4.7 4.7 0 0 1 9.5-1.3 4.7 4.7 0 0 1 9.5 1.3c0 3.3-3 6.5-9.5 11.5z"/></g>'],
+  bracelet: ['a-tilt', '<ellipse class="band" cx="32" cy="22" rx="23" ry="8"/><ellipse class="band au-l" cx="32" cy="32" rx="23" ry="8"/><ellipse class="band" cx="32" cy="42" rx="23" ry="8"/><circle class="au" cx="32" cy="50" r="2"/><circle class="au" cx="20" cy="48.5" r="1.6"/><circle class="au" cx="44" cy="48.5" r="1.6"/>'],
+  watch: ['a-float', '<path class="fl" d="M25 20l1.5-14h11L39 20zM25 44l1.5 14h11L39 44z"/><circle class="fl" cx="32" cy="32" r="15"/><circle class="au-l" cx="32" cy="32" r="15"/><circle class="thin" cx="32" cy="32" r="11.5"/><path class="thin" d="M32 21.5v2M42.5 32h-2M32 42.5v-2M21.5 32h2"/><path class="hand-h" d="M32 32v-6"/><path class="hand-m" d="M32 32v-9"/><circle class="au" cx="32" cy="32" r="1.4"/><rect class="au" x="47" y="30" width="3" height="4" rx="1"/>'],
+  frame: ['a-tumble', '<rect class="fl" x="13" y="8" width="38" height="48" rx="2.5"/><rect class="thin" x="18" y="13" width="28" height="28" rx="1"/><path class="thin" d="M18 36l8-8 6 6 4-4 10 10M22 48h14"/><path class="au" d="M38 23.5c-2.6-2-4-3.3-4-4.6a2 2 0 0 1 4-.5 2 2 0 0 1 4 .5c0 1.3-1.4 2.6-4 4.6z"/>'],
+  keychain: ['a-swing-k', '<circle class="au-l" cx="22" cy="14" r="9"/><path d="M28 20.5l2.5 3M31.5 25l2.5 3"/><path class="fl" d="M41 58c-8.5-6.5-13-10.5-13-16a6.5 6.5 0 0 1 13-1.6A6.5 6.5 0 0 1 54 42c0 5.5-4.5 9.5-13 16z"/><circle class="au" cx="41" cy="44" r="2"/>'],
+  wallet: ['a-float', '<g class="coin"><circle class="au" cx="40" cy="12" r="7"/><circle class="au-l thin" cx="40" cy="12" r="4.5"/></g><rect class="fl" x="8" y="18" width="46" height="34" rx="5"/><path d="M54 29H43a6 6 0 0 0 0 12h11"/><circle class="au" cx="43.5" cy="35" r="1.8"/><path class="thin" d="M13 24h26"/>'],
+  chocolate: ['a-tilt', '<rect class="fl" x="15" y="6" width="34" height="52" rx="3"/><path class="thin" d="M15 19h34M15 32h34M32 6v26"/><path class="au" d="M15 36l34-8v27a3 3 0 0 1-3 3H18a3 3 0 0 1-3-3z"/><path class="thin" d="M21 47h16"/>'],
+  candle: ['a-float', '<circle class="halo" cx="32" cy="17" r="12"/><path class="flame" d="M32 6c4.5 5.5 6.5 9 6.5 12.5a6.5 6.5 0 0 1-13 0C25.5 15 27.5 11.5 32 6z"/><path d="M32 25v4"/><rect class="fl" x="21" y="29" width="22" height="28" rx="3"/><path class="thin" d="M21 35c3 0 3 5 6 5s3-5 6-5 3 7 6 7 4-5 4-5"/>'],
+  rose: ['a-sway', '<path class="fl" d="M32 31c-8.5 0-13-6.5-13-13 4.5 2 6.5 0 8.5-4.5 2 3 4.5 3 4.5 3s2.5 0 4.5-3c2 4.5 4 6.5 8.5 4.5 0 6.5-4.5 13-13 13z"/><path class="thin" d="M27 19c2 3 8 3 10 0"/><path d="M32 31v28"/><path class="leaf" d="M32 46c-7 0-11-4.5-12-9 5.5 0 10 2.5 12 9zM32 52c5.5 0 10-3.5 11-8-5.5 0-9 2.5-11 8z"/>'],
+  attar: ['a-float', '<path class="wisp" d="M36 9c4-1 4-5 8-6M38 13c5 0 6-4 10-3"/><path class="au" d="M32 4c3.2 4 4.6 6.8 4.6 9.2a4.6 4.6 0 0 1-9.2 0C27.4 10.8 28.8 8 32 4z"/><rect class="au" x="28.5" y="17.5" width="7" height="3" rx="1"/><path d="M30 20.5v5M34 20.5v5"/><path class="fl" d="M30 25.5h4c9 3 14 9.5 14 17 0 9-7 15-16 15s-16-6-16-15c0-7.5 5-14 14-17z"/><path class="thin" d="M32 27v29M21 37c6 3 16 3 22 0"/><path class="au-l" d="M18.5 47c6 2.6 21 2.6 27 0"/><path class="thin" d="M25 57.5h14"/><path class="glint" d="M40 33l1 2.7 2.7 1-2.7 1L40 40.5l-1-2.8-2.7-1 2.7-1z"/>'],
+  drop: ['a-float', '<path class="fl" d="M32 10c8 10 12 17 12 23a12 12 0 0 1-24 0c0-6 4-13 12-23z"/><path class="au-l" d="M32 10c8 10 12 17 12 23a12 12 0 0 1-24 0c0-6 4-13 12-23z"/><path class="thin" d="M26.5 33a6 6 0 0 0 4.5 6"/>'],
+  heart: ['a-float', '<path class="fl" d="M32 52C18 42 10 34 10 25a10 10 0 0 1 22-4 10 10 0 0 1 22 4c0 9-8 17-22 27z"/>'],
+  sparkle: ['a-twinkle', '<path class="au" d="M32 6q0 26 26 26-26 0-26 26 0-26-26-26 26 0 26-26z"/>'],
+  petal: ['a-flutter', '<path class="petal" d="M32 8c10 8 14 20 0 48C18 28 22 16 32 8z"/>'],
+  coin: ['a-spin', '<circle class="au" cx="32" cy="32" r="22"/><circle class="au-l" cx="32" cy="32" r="15"/>'],
+  ember: ['a-twinkle', '<circle class="halo" cx="32" cy="32" r="22"/><circle class="au" cx="32" cy="32" r="9"/>'],
+};
+const ACCENT = { rose: 'petal', wallet: 'coin', candle: 'ember', frame: 'heart', keychain: 'heart', chocolate: 'heart', attar: 'drop' };
+// New categories default to art "giftbox", so the name is checked first ("earring" before "ring").
+const MOTIF_WORDS = [['attar|ittar|\\bitr\\b|perfume|fragrance|scent|\\boud\\b|cologne', 'attar'], ['earring|jhumka|stud', 'earrings'], ['ring', 'ring'], ['necklace|pendant|chain|locket', 'necklace'], ['bracelet|bangle|churi', 'bracelet'], ['watch', 'watch'], ['frame|photo', 'frame'], ['keychain|charm', 'keychain'], ['wallet|\\bhim\\b|\\bmen\\b', 'wallet'], ['chocolate|treat|sweet|cake', 'chocolate'], ['candle|keepsake|home', 'candle'], ['flower|rose|bouquet|bloom', 'rose'], ['gift|box|hamper', 'giftbox']];
+function motifFor(cat) {
+  const text = `${cat.slug} ${cat.name}`.toLowerCase();
+  for (const [re, m] of MOTIF_WORDS) if (new RegExp(re).test(text)) return m;
+  return MOTIFS[cat.art] && cat.art !== 'giftbox' ? cat.art : 'heart';
+}
+// Category colours are pastels; the motif ink is the same hue, deepened.
+function inkFor(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return '#8E2C5C';
+  const n = parseInt(m[1], 16), r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn, l = (mx + mn) / 2;
+  if (!d) return '#6B5A63';
+  const s = d / (1 - Math.abs(2 * l - 1));
+  const h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return `hsl(${Math.round(h * 60 + 360) % 360} ${Math.round(Math.min(s, .62) * 100)}% 40%)`;
+}
+function catBackdrop(cat) {
+  const main = motifFor(cat), acc = ACCENT[main] || 'sparkle';
+  let seed = [...cat.slug].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const btw = (a, b, p = 1) => (a + rnd() * (b - a)).toFixed(p);
+  // name, parallax depth, count, size px, rise seconds, opacity, motif
+  const layer = (name, depth, n, [s0, s1], [d0, d1], o, kind) => {
+    const [behave, body] = MOTIFS[kind];
+    let h = '';
+    for (let i = 0; i < n; i++) {
+      const dur = +btw(d0, d1);
+      h += `<span class="mf" style="left:${((i + rnd() * .8 + .1) / n * 100 - 4).toFixed(1)}%;width:${btw(s0, s1, 0)}px;--y:${btw(4, 86)}%;--dur:${dur}s;--dl:-${btw(0, dur)}s;--sd:${btw(4, 8)}s;--sx:${btw(8, 26, 0)}px;--o:${o};--bd:${btw(7, 13)}s;--bdl:-${btw(0, 12)}s"><span class="sw"><svg class="${behave}" viewBox="0 0 64 64">${body}</svg></span></span>`;
+    }
+    return `<div class="cb-l cb-${name}" data-d="${depth}">${h}</div>`;
+  };
+  return '<div class="cb-glow"><i></i><i></i><i></i></div>'
+    + layer('far', .25, 9, [24, 38], [60, 80], .2, main)
+    + layer('mid', .55, 7, [48, 72], [40, 52], .28, main)
+    + layer('acc', .8, acc === 'petal' ? 16 : 11, acc === 'petal' ? [14, 24] : [10, 20], [20, 32], acc === 'petal' ? .32 : .6, acc)
+    + layer('near', 1, 4, [84, 118], [30, 38], .3, main);
+}
+const backdrop = document.createElement('div');
+backdrop.className = 'cat-bg';
+backdrop.setAttribute('aria-hidden', 'true');
+document.body.prepend(backdrop);
+// Gentle mouse parallax: nearer layers follow the pointer a little more.
+if (matchMedia('(pointer: fine)').matches && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  let mx = 0, my = 0, raf = 0;
+  const paint = () => { raf = 0; for (const l of backdrop.querySelectorAll('.cb-l')) l.style.transform = `translate3d(${(mx * l.dataset.d * 22).toFixed(1)}px,${(my * l.dataset.d * 16).toFixed(1)}px,0)`; };
+  addEventListener('pointermove', (e) => {
+    if (!backdrop.firstChild) return;
+    mx = e.clientX / innerWidth - .5; my = e.clientY / innerHeight - .5;
+    if (!raf) raf = requestAnimationFrame(paint);
+  }, { passive: true });
+}
+
 /* ================================================================= router */
 let current = null;
 const ROUTES = [
@@ -295,6 +376,11 @@ function render(y = 0) {
   document.title = view.title ? `${view.title} | ${brand}` : `${brand} | ${C.settings.store.tagline}`;
   document.body.classList.toggle('funnel-mode', view.name === 'funnel');
   document.body.dataset.view = view.name || '';
+  if (backdrop.dataset.key !== (view.backdrop?.slug || '')) {
+    backdrop.dataset.key = view.backdrop?.slug || '';
+    backdrop.innerHTML = view.backdrop ? catBackdrop(view.backdrop) : '';
+    if (view.backdrop) { backdrop.style.setProperty('--tint', view.backdrop.color || '#F6DCE8'); backdrop.style.setProperty('--ink', inkFor(view.backdrop.color)); }
+  }
   view.mount?.(root);
   for (const a of $$('[data-nav]')) a.classList.toggle('active', a.dataset.nav === (view.nav || view.name));
   window.scrollTo(0, y);
@@ -376,7 +462,7 @@ function hydrateShell() {
   </div></div>
   <div class="container ftr-grid">
     <div class="ftr-brand">
-      <a href="/" class="logo logo-ftr" aria-label="${esc(st.name)} home">${logoMark()}<span>${esc(st.name)}</span></a>
+      <a href="/" class="logo logo-ftr">${logoImg(st.name, true)}</a>
       <p>${esc(st.tagline)}. Handpicked gifts, wrapped with love in Dhaka and delivered across Bangladesh.</p>
       <div class="social">${social.map(([n, u]) => `<a href="${esc(u)}" target="_blank" rel="noopener" aria-label="${n}">${ic(n)}</a>`).join('')}</div>
     </div>
@@ -400,7 +486,8 @@ function hydrateShell() {
   let ticking = false;
   addEventListener('scroll', () => { if (ticking) return; ticking = true; requestAnimationFrame(() => { hdr.classList.toggle('scrolled', scrollY > 8); ticking = false; }); }, { passive: true });
 }
-const logoMark = () => `<svg class="logo-mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M20 21C15 13 6 12 7.5 18.5 8.7 23.4 16 22.6 20 21Zm0 0c5-8 14-9 12.5-2.5C31.3 23.4 24 22.6 20 21Z" fill="currentColor"/><path d="M19 22 14 32l3.2-.6L18.8 34 21 22.6M21 22l5 10-3.2-.6L21.2 34 19 22.6" fill="currentColor" opacity=".7"/><circle cx="20" cy="21.3" r="3" fill="var(--gold)"/></svg>`;
+// The BLISS logo (public/img/brand): black on light backgrounds, white on dark ones.
+const logoImg = (name, light = false) => `<img class="logo-img" src="/img/brand/bliss-logo${light ? '-white' : ''}.svg" alt="${esc(name)} home" width="140" height="50">`;
 
 /* ================================================================== home */
 function viewHome() {
@@ -611,7 +698,7 @@ function viewShop(base) {
     </div>
   </div>`;
   return {
-    name: 'shop', nav: baseCat ? 'cat-' + baseCat.slug : 'shop', title,
+    name: 'shop', nav: baseCat ? 'cat-' + baseCat.slug : 'shop', title, backdrop: baseCat,
     html,
     mount(root) {
       const grid = $('#rgrid', root), countEl = $('#rcount', root), chips = $('#achips', root);
@@ -2125,17 +2212,36 @@ FORMS.search = (f) => {
 
 /* ============================================================ mobile menu */
 function openMenu() {
-  const st = C.settings.store;
+  const st = C.settings.store, here = location.pathname;
+  const cur = (href) => (here === href ? ' aria-current="page"' : '');
+  const count = (id) => IDX.facets.cat.get(id)?.count() || 0;
+  const quick = [['/shop', 'grid', 'Shop all', 'blush'], ['/gift-box-builder', 'gift', 'Build a box', 'peach'], ['/offers', 'tag', 'Offers', 'butter'], ['/category/gift-boxes', 'box', 'Ready to gift', 'sage']];
+  const links = [
+    ['/account', 'user', S.user ? `Hi, ${esc(S.user.name.split(' ')[0])}` : 'Log in / Sign up', S.user ? 'Orders & details' : 'Track orders, save addresses'],
+    ['/wishlist', 'heart', 'Wishlist', S.wish.size ? plural(S.wish.size, 'saved gift') : 'Gifts you love'],
+    ['/track', 'truck', 'Track order', 'Where is my gift?'],
+    ['/corporate', 'briefcase', 'Corporate & bulk', 'Gifts for teams & clients'],
+    ['/help', 'help', 'Help & FAQ', 'Delivery, returns, payment'],
+  ];
+  const social = [['facebook', st.facebook], ['instagram', st.instagram], ['tiktok', st.tiktok]].filter(([, u]) => u);
   openLayer('drawer left', `<div class="drawer-in menu">
-    <header class="drawer-head"><a href="/" class="logo">${logoMark()}<span>${esc(st.name)}</span></a><button type="button" class="ibtn" data-act="close-layer" aria-label="Close menu">${ic('close')}</button></header>
-    <div class="drawer-body">
-      <nav class="menu-main"><a href="/shop">${ic('grid')}Shop all gifts</a><a href="/gift-box-builder">${ic('gift')}Build a gift box</a><a href="/category/gift-boxes">${ic('box')}Ready-to-gift boxes</a><a href="/offers">${ic('tag')}Offers</a><a href="/corporate">${ic('briefcase')}Corporate & bulk</a></nav>
-      <h3 class="menu-h">Categories</h3>
-      <nav class="menu-cats">${C.categories.map((c) => `<a href="/category/${c.slug}"><img src="${esc(c.image)}" alt="" width="40" height="40" loading="lazy">${esc(c.name)}</a>`).join('')}</nav>
-      <h3 class="menu-h">Occasions</h3>
-      <div class="chips">${OCCASIONS.map(([k, l, i]) => `<a class="chip" href="/occasion/${k}">${ic(i)}${l}</a>`).join('')}</div>
-      <nav class="menu-main sub"><a href="/account">${ic('user')}${S.user ? 'My account' : 'Log in / Sign up'}</a><a href="/track">${ic('truck')}Track order</a><a href="/help">${ic('help')}Help & FAQ</a></nav>
-    </div></div>`, { label: 'Menu' });
+    <header class="drawer-head menu-head"><a href="/" class="logo">${logoImg(st.name)}</a><button type="button" class="ibtn" data-act="close-layer" aria-label="Close menu">${ic('close')}</button></header>
+    <div class="drawer-body menu-body">
+      <button type="button" class="menu-search" data-act="open-search">${ic('search')}<span>Search gifts…</span></button>
+      <nav class="menu-quick" aria-label="Shop">${quick.map(([href, icon, label, tint]) => `<a href="${href}" style="--tint:var(--${tint})"${cur(href)}><span class="mq-ic">${ic(icon)}</span>${label}</a>`).join('')}</nav>
+      <section class="menu-sec"><h3 class="menu-h">Shop by category</h3>
+        <nav class="menu-cats" aria-label="Categories">${C.categories.map((c) => `<a href="/category/${c.slug}"${cur('/category/' + c.slug)}><span class="mc-img" style="--tile:${esc(c.color)}"><img src="${esc(c.image)}" alt="" width="80" height="80" loading="lazy"></span><b>${esc(c.name)}</b><small>${count(c.id)} gifts</small></a>`).join('')}</nav>
+      </section>
+      <section class="menu-sec"><h3 class="menu-h">Shop by occasion</h3>
+        <div class="menu-occ">${OCCASIONS.map(([k, l, i]) => `<a class="chip" href="/occasion/${k}"${cur('/occasion/' + k)}>${ic(i)}${l}</a>`).join('')}</div>
+      </section>
+      <nav class="menu-links" aria-label="Account and help">${links.map(([href, icon, label, sub]) => `<a href="${href}"${cur(href)}><span class="ml-ic">${ic(icon)}</span><span class="ml-txt"><b>${label}</b><small>${sub}</small></span>${ic('chev-right', 'ml-chev')}</a>`).join('')}</nav>
+    </div>
+    <footer class="menu-foot">
+      <p>Need help choosing a gift?</p>
+      <div class="menu-contact">${st.whatsapp ? `<a class="btn btn-wa" href="https://wa.me/${esc(st.whatsapp)}" target="_blank" rel="noopener">${ic('whatsapp')}WhatsApp</a>` : ''}${st.phone ? `<a class="btn btn-ghost" href="tel:${esc(st.phone.replace(/[^+\d]/g, ''))}">${ic('phone')}Call us</a>` : ''}</div>
+      ${social.length ? `<div class="menu-social">${social.map(([n, u]) => `<a href="${esc(u)}" target="_blank" rel="noopener" aria-label="${n}">${ic(n)}</a>`).join('')}</div>` : ''}
+    </footer></div>`, { label: 'Menu' });
 }
 
 /* =================================================== catalogue freshness */

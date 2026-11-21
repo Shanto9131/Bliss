@@ -122,7 +122,7 @@ export class Renderer {
     let c = this.cache.get(key);
     if (!c || c.v !== this.store.version) {
       const urls = ['/', '/shop', '/gift-box-builder', '/corporate', '/help', '/about',
-        ...this.store.data.categories.map((x) => `/category/${x.slug}`),
+        ...this.store.data.categories.filter((x) => this.store.data.products.some((p) => p.active && p.cat === x.id)).map((x) => `/category/${x.slug}`),
         ...this.store.data.products.filter((p) => p.active).map((p) => `/product/${p.slug}`)];
       const xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map((u) => `<url><loc>${escapeHtml(origin + u)}</loc></url>`).join('')}</urlset>`;
       c = this.cache.set(key, { v: this.store.version, entry: makeEntry(Buffer.from(xml), 'application/xml; charset=utf-8', 5) });

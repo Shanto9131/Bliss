@@ -489,3 +489,30 @@ export function detectSource(search, referrer) {
 }
 export const CHANNELS = { direct: 'Direct', facebook: 'Facebook', instagram: 'Instagram', google: 'Google', tiktok: 'TikTok', youtube: 'YouTube', whatsapp: 'WhatsApp', email: 'Email', sms: 'SMS', search: 'Other search', referral: 'Other websites', phone: 'Phone call', 'walk-in': 'Walk-in', other: 'Other' };
 export const STOCK_LABEL = { in: 'In stock', limited: 'Limited stock', out: 'Out of stock' };
+
+/* Product spreadsheet columns for the dashboard's import & export.
+   [field, header written by the export, ...other header names the import recognises] */
+export const SHEET_FIELDS = [
+  ['id', 'ID', 'product id'],
+  ['sku', 'SKU', 'code', 'product code', 'item code', 'barcode'],
+  ['name', 'Name', 'product name', 'product', 'title', 'item', 'item name'],
+  ['category', 'Category', 'categories', 'catagory', 'catagories', 'cat', 'collection', 'type'],
+  ['price', 'Price', 'selling price', 'sale price', 'mrp', 'rate', 'unit price'],
+  ['compare', 'Compare at price', 'compare price', 'regular price', 'old price', 'original price'],
+  ['cost', 'Cost', 'cost price', 'buying price', 'purchase price', 'buy price'],
+  ['qty', 'Quantity', 'qty', 'stock', 'stock qty', 'on hand', 'inventory', 'units'],
+  ['status', 'Stock status', 'status', 'availability'],
+  ['active', 'Visible', 'active', 'show', 'show in shop', 'published', 'visibility'],
+  ['featured', 'Featured'],
+  ['gender', 'For', 'gender', 'recipient'],
+  ['tags', 'Occasions', 'occasion', 'tags'],
+  ['options', 'Options', 'option', 'variants'],
+  ['highlights', 'Highlights', 'features', 'bullet points'],
+  ['desc', 'Description', 'desc', 'details', 'about'],
+  ['images', 'Images', 'image', 'photos', 'photo', 'image url', 'image urls', 'picture', 'pictures', 'img'],
+  ['keywords', 'Keywords', 'search keywords'],
+  ['supplier', 'Supplier', 'vendor'],
+  ['slug', 'URL handle', 'slug', 'handle', 'url'],
+];
+/** "Price (৳)" -> "price": how column headers are compared. */
+export const sheetKey = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');

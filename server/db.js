@@ -4,10 +4,11 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { slugify, computeTotals, ORDER_STATUSES, INACTIVE_STATUSES, funnelSettings } from '../public/assets/js/engine.js';
+import { slugify, computeTotals, ORDER_STATUSES, INACTIVE_STATUSES, funnelSettings, SHEET_FIELDS, sheetKey } from '../public/assets/js/engine.js';
 import { HttpError } from './http.js';
 import { hashPassword, verifyPassword } from './auth.js';
 import { defaultSettings, demoCost, demoFunnels } from './seed.js';
+import { STARTER_CATEGORIES, STARTER_PRODUCTS } from './catalog.js';
 
 const STATUS_KEYS = new Set(ORDER_STATUSES.map((s) => s[0]));
 const PHONE_RE = /^01[3-9]\d{8}$/;
@@ -18,6 +19,14 @@ export const dhakaDate = (ts) => dhakaFmt.format(new Date(ts));
 export const MANUAL_CHANNELS = ['phone', 'facebook', 'instagram', 'whatsapp', 'walk-in', 'other'];
 export const EXPENSE_CATEGORIES = ['ads', 'packaging', 'courier', 'salaries', 'rent', 'utilities', 'stock', 'software', 'other'];
 const STOCK_REASONS = new Set(['count', 'damaged', 'lost', 'gift', 'return', 'other']);
+// Spreadsheet import: words people type, mapped to stored values (keys as sheetKey() makes them).
+const SHEET_STOCK = { in: 'In stock', limited: 'Limited stock', out: 'Out of stock' };
+const STOCK_WORDS = { in: 'in', instock: 'in', available: 'in', yes: 'in', limited: 'limited', limitedstock: 'limited', low: 'limited', lowstock: 'limited', out: 'out', outofstock: 'out', soldout: 'out', no: 'out', unavailable: 'out' };
+const GENDER_WORDS = { her: 'her', forher: 'her', women: 'her', woman: 'her', female: 'her', girl: 'her', girls: 'her', him: 'him', forhim: 'him', men: 'him', man: 'him', male: 'him', boy: 'him', boys: 'him', unisex: 'unisex', everyone: 'unisex', all: 'unisex', anyone: 'unisex', kids: 'kids', kid: 'kids', children: 'kids', child: 'kids', baby: 'kids' };
+const YES = /^(yes|y|true|1|on|visible|show|shown|active|published)$/i, NO = /^(no|n|false|0|off|hidden|hide|inactive|draft)$/i;
+const emptyToNull = (v) => (v == null || v === '' || (Array.isArray(v) && !v.length) ? null : v);
+const sameVal = (a, b) => JSON.stringify(emptyToNull(a)) === JSON.stringify(emptyToNull(b));
+const DIFF_FIELDS = [['name', 'Name'], ['cat', 'Category'], ['price', 'Price'], ['compare', 'Compare-at price'], ['cost', 'Cost'], ['qty', 'Quantity'], ['status', 'Stock status'], ['active', 'Visible'], ['featured', 'Featured'], ['gender', 'For'], ['tags', 'Occasions'], ['options', 'Options'], ['highlights', 'Highlights'], ['desc', 'Description'], ['images', 'Photos'], ['keywords', 'Keywords'], ['supplier', 'Supplier'], ['sku', 'SKU'], ['slug', 'URL handle']];
 
 const rid = (prefix) => `${prefix}_${crypto.randomBytes(5).toString('hex')}`;
 const str = (v, max = 200) => String(v ?? '').trim().slice(0, max);
@@ -97,6 +106,15 @@ export class Store {
       if (!d.funnels.length && d.products.some((p) => p.demo)) d.funnels = demoFunnels(d.products);
       d.meta.schema = 2;
       this.save();
+    }
+    if (d.meta.schema < 3) {
+      // BLISS's own catalogue (server/catalog.js): Bouquets and Attar. Runs once per database.
+      this.reindex();
+      for (const c of STARTER_CATEGORIES) if (!d.categories.some((x) => x.slug === c.slug)) this.saveCategory(c);
+      const res = this.importProducts(STARTER_PRODUCTS, { commit: true, existing: 'skip' });
+      if (res.failed.length) console.warn('! Some starter products could not be added:', res.failed);
+      d.meta.schema = 3;
+      this.save(true);
     }
   }
 
@@ -232,7 +250,8 @@ export class Store {
     return {
       v: this.version,
       settings: this.publicSettings(),
-      categories: [...this.data.categories].sort((a, b) => (a.sort ?? 99) - (b.sort ?? 99)),
+      // Categories without a visible product are left out, so shoppers never land on an empty page.
+      categories: [...this.data.categories].filter((c) => this.data.products.some((p) => p.active && p.cat === c.id)).sort((a, b) => (a.sort ?? 99) - (b.sort ?? 99)),
       products: this.data.products.filter((p) => p.active).map((p) => this.publicProduct(p, sig.recent)),
       // Real, approved 5-star reviews for the homepage "loved by" section.
       reviews: this.data.reviews.filter((r) => r.approved && r.rating === 5 && r.text.length > 40 && this.products.get(r.pid)?.active)
@@ -282,18 +301,19 @@ export class Store {
     while (this.slugs.has(slug) && this.slugs.get(slug).id !== selfId) slug = `${base}-${n++}`;
     return slug;
   }
-  _normProduct(inp, ex = {}) {
+  /** Import preview: `newCat` = the category does not exist yet; `preview` = allow "local:N" photo placeholders. */
+  _normProduct(inp, ex = {}, { newCat = false, preview = false } = {}) {
     const name = str(inp.name ?? ex.name, 120);
     if (name.length < 2) throw bad('Please enter a product name.', 'name');
     const cat = str(inp.cat ?? ex.cat, 60);
-    if (!this.categories.has(cat)) throw bad('Please choose a category.', 'cat');
+    if (!newCat && !this.categories.has(cat)) throw bad('Please choose a category.', 'cat');
     const price = num(inp.price ?? ex.price, 0, 10_000_000, NaN);
     if (!Number.isFinite(price)) throw bad('Please enter a valid price.', 'price');
     let compare = num(inp.compare ?? ex.compare, 0, 10_000_000, 0);
     if (compare <= price) compare = 0;
     const slug = this._uniqueSlug(slugify(str(inp.slug, 80) || ex.slug || name), ex.id);
     const images = (Array.isArray(inp.images) ? inp.images : ex.images || [])
-      .map((x) => str(x, 600)).filter((u) => /^(\/uploads\/|\/img\/|https:\/\/)/.test(u)).slice(0, 10);
+      .map((x) => str(x, 600)).filter((u) => /^(\/uploads\/|\/img\/|https:\/\/)/.test(u) || (preview && /^local:\d+$/.test(u))).slice(0, 10);
     const rawQty = inp.qty !== undefined ? inp.qty : ex.qty;
     const qty = rawQty === null || rawQty === '' || rawQty === undefined ? null : int(rawQty, 0, 1_000_000, null);
     const rawLow = inp.lowStock !== undefined ? inp.lowStock : ex.lowStock;
@@ -320,6 +340,7 @@ export class Store {
       keywords: str(inp.keywords ?? ex.keywords, 300), updated: Date.now(),
     };
     if (!compare) p.saleEnds = null;
+    if (p.active && !(price > 0)) throw bad('Set a price above ৳0 before showing this product in the shop.', 'price');
     if (p.qty != null && (p.autoStock || p.qty === 0)) this._autoStatus(p);
     return p;
   }
@@ -331,14 +352,14 @@ export class Store {
     this.save(true);
     return p;
   }
-  updateProduct(id, inp) {
+  updateProduct(id, inp, note = 'Edited in product form') {
     const ex = this.products.get(id);
     if (!ex) throw new HttpError(404, 'Product not found.');
     const oldSlug = ex.slug, oldQty = ex.qty;
     const next = this._normProduct(inp, ex);
     Object.assign(ex, next);
     if (oldSlug !== ex.slug) { this.slugs.delete(oldSlug); this.slugs.set(ex.slug, ex); }
-    if (ex.qty !== oldQty) this._log(ex, (ex.qty ?? 0) - (oldQty ?? 0), 'count', '', 'Edited in product form');
+    if (ex.qty !== oldQty) this._log(ex, (ex.qty ?? 0) - (oldQty ?? 0), 'count', '', note);
     this.save(true);
     return ex;
   }
@@ -410,6 +431,10 @@ export class Store {
   bulkProducts(ids, action, value) {
     const list = ids.map((id) => this.products.get(id)).filter(Boolean);
     if (action === 'delete') { this.deleteProducts(list.map((p) => p.id)); return list.length; }
+    if (action === 'active' && bool(value)) {
+      const free = list.filter((p) => !(p.price > 0));
+      if (free.length) throw bad(`Set a price first: ${free.slice(0, 3).map((p) => p.name).join(', ')}${free.length > 3 ? ` and ${free.length - 3} more` : ''} ${free.length > 1 ? 'have' : 'has'} no price yet.`);
+    }
     for (const p of list) {
       if (action === 'status') this.setStock(p.id, { status: value });
       else if (action === 'active') p.active = bool(value);
@@ -420,6 +445,159 @@ export class Store {
     }
     this.save(true);
     return list.length;
+  }
+
+  /* ------------------------------------------------- spreadsheet import */
+  /** One product as a spreadsheet row, in SHEET_FIELDS order (the import reads it back). */
+  sheetRow(p) {
+    return [
+      p.id, p.sku, p.name, this.categories.get(p.cat)?.name || '', p.price, p.compare || '', p.cost ?? '', p.qty ?? '',
+      SHEET_STOCK[p.status] || p.status, p.active ? 'yes' : 'no', p.featured ? 'yes' : 'no', p.gender, (p.tags || []).join(', '),
+      (p.options || []).map((o) => `${o.name}: ${o.values.join(' | ')}`).join('; '), (p.highlights || []).join(' | '), p.desc,
+      (p.images || []).join(' | '), p.keywords, p.supplier, p.slug,
+    ];
+  }
+  /**
+   * Adds or updates products from spreadsheet rows ({ field: text }, fields as in SHEET_FIELDS).
+   * Matches an existing product by ID, then SKU, then name (ignoring case). An empty cell keeps the
+   * current value. With commit = false nothing is saved: it returns what would happen, row by row.
+   * `existing`: 'update' or 'skip' products that already exist.
+   * Photo cells may hold "local:N" placeholders while previewing (files the dashboard uploads on approval).
+   */
+  importProducts(rows, { commit = false, existing = 'update' } = {}) {
+    if (!Array.isArray(rows)) throw bad('No rows to import.');
+    if (rows.length > 2000) throw bad('Please import at most 2,000 rows at a time.');
+    const lc = (s) => String(s).trim().toLowerCase();
+    const bySku = new Map(), byName = new Map(), cats = new Map();
+    for (const p of this.data.products) { if (p.sku) bySku.set(lc(p.sku), p); byName.set(lc(p.name), p); }
+    for (const c of this.data.categories) for (const k of [c.id, c.slug, c.name]) cats.set(lc(k), c);
+    const newCats = new Map(); // lower-case name -> name as typed
+    const seen = new Map();    // product key -> line number (catches the same product twice in one file)
+    const out = [];
+
+    rows.forEach((raw, i) => {
+      const line = Number(raw?.line) || i + 2;
+      const r = {}, inp = {}, errors = [], warnings = [];
+      for (const [f] of SHEET_FIELDS) {
+        const v = raw?.[f];
+        let s = (Array.isArray(v) ? v.join('\n') : String(v ?? '')).trim();
+        if (/^'[=+\-@]/.test(s)) s = s.slice(1); // undo the export's formula guard
+        if (s) r[f] = s;
+      }
+      if (!Object.keys(r).length) return; // blank row
+      const label = r.name || r.sku || `Row ${line}`;
+
+      if (r.name) inp.name = r.name;
+      for (const [f, what] of [['price', 'Price'], ['compare', 'Compare-at price'], ['cost', 'Cost']]) {
+        if (r[f] == null) continue;
+        const n = Number(r[f].replace(/৳|tk\.?|taka|bdt|,|\s/gi, ''));
+        if (Number.isFinite(n) && n >= 0) inp[f] = n; else errors.push(`${what} “${r[f]}” is not a number.`);
+      }
+      if (r.qty != null) {
+        if (/^(not tracked|untracked|-|—|n\/?a)$/i.test(r.qty)) inp.qty = null;
+        else { const n = Number(r.qty.replace(/,|\s/g, '')); if (Number.isInteger(n) && n >= 0) inp.qty = n; else errors.push(`Quantity “${r.qty}” must be a whole number.`); }
+      }
+      if (r.status) { const s = STOCK_WORDS[sheetKey(r.status)]; if (s) inp.status = s; else warnings.push(`Stock status “${r.status}” was not understood (use In stock, Limited or Out of stock).`); }
+      for (const [f, what] of [['active', 'Visible'], ['featured', 'Featured']]) {
+        if (r[f] == null) continue;
+        if (YES.test(r[f])) inp[f] = true; else if (NO.test(r[f])) inp[f] = false; else warnings.push(`${what} “${r[f]}” was not understood (use yes or no).`);
+      }
+      if (r.gender) { const g = GENDER_WORDS[sheetKey(r.gender)]; if (g) inp.gender = g; else warnings.push(`For “${r.gender}” was not understood (use her, him, unisex or kids).`); }
+      if (r.tags) inp.tags = r.tags.split(/[,;|\n]/).map((t) => t.replace(/['’]/g, '').trim()).filter(Boolean);
+      if (r.highlights) inp.highlights = r.highlights.split(/\s*[|\n]\s*/).filter(Boolean);
+      if (r.options) {
+        inp.options = r.options.split(/[;\n]/).map((s) => s.trim()).filter(Boolean).map((s) => {
+          const m = s.match(/^([^:]+):(.+)$/);
+          if (!m) { warnings.push(`Option “${s}” needs the form Name: value | value.`); return null; }
+          return { name: m[1].trim(), values: m[2].split(/[|,]/).map((v) => v.trim()).filter(Boolean) };
+        }).filter(Boolean);
+      }
+      if (r.images) {
+        const imgs = [];
+        for (const t of r.images.split(/\s*[|\n,]\s*/).filter(Boolean)) {
+          if (/^(\/uploads\/|\/img\/)\S+$|^https:\/\/\S+$/i.test(t) || (!commit && /^local:\d+$/.test(t))) imgs.push(t);
+          else warnings.push(`Photo “${t}” was not found. Add the photo file, or use a full https:// link.`);
+        }
+        if (imgs.length) inp.images = imgs.slice(0, 10);
+      }
+      for (const f of ['desc', 'keywords', 'supplier', 'sku', 'slug']) if (r[f] != null) inp[f] = r[f];
+
+      let cat = null, newCat = '';
+      if (r.category) {
+        cat = cats.get(lc(r.category));
+        if (cat) inp.cat = cat.id;
+        else { newCat = r.category.slice(0, 60); if (!newCats.has(lc(newCat))) newCats.set(lc(newCat), newCat); }
+      }
+
+      const ex = (r.id && this.products.get(r.id)) || (r.sku && bySku.get(lc(r.sku))) || (r.name && byName.get(lc(r.name))) || null;
+      const row = { line, name: label, id: ex?.id || null, errors, warnings, changes: [] };
+      const key = ex ? ex.id : 'new:' + lc(r.name || r.sku || line);
+      if (seen.has(key)) errors.push(`This is the same product as row ${seen.get(key)}.`); else seen.set(key, line);
+
+      if (ex && existing === 'skip') row.action = 'skip';
+      else if (!ex) {
+        if (!r.name) errors.push('Name is missing.');
+        if (!r.category) errors.push('Category is missing.');
+        if (inp.price == null && !errors.some((e) => e.startsWith('Price'))) errors.push('Price is missing.');
+        row.action = 'create';
+      } else row.action = 'update';
+
+      let p = null;
+      if (!errors.length && row.action !== 'skip') {
+        try { p = this._normProduct(inp, ex || {}, { newCat: !!newCat, preview: !commit }); }
+        catch (e) { if (e instanceof HttpError) errors.push(e.message); else throw e; }
+      }
+      if (p) {
+        if (ex) {
+          for (const [f, what] of DIFF_FIELDS) {
+            if (sameVal(ex[f], p[f]) && !(f === 'cat' && newCat)) continue;
+            const to = f === 'cat' && newCat ? newCat : f === 'images' && p.images.length ? `${p.images.length} new photo${p.images.length === 1 ? '' : 's'}` : this._sheetShow(f, p[f]);
+            row.changes.push({ field: what, from: this._sheetShow(f, ex[f]), to });
+          }
+          if (!row.changes.length) row.action = 'same';
+        }
+        Object.assign(row, {
+          name: p.name, category: newCat || this.categories.get(p.cat)?.name || '', newCategory: !!newCat,
+          price: p.price, compare: p.compare, qty: p.qty, status: p.status, active: p.active, image: p.images[0] || '',
+        });
+      }
+      if (errors.length) row.action = 'error';
+      row._inp = inp; row._ex = ex; row._newCat = newCat;
+      out.push(row);
+    });
+
+    const count = (a) => out.filter((x) => x.action === a).length;
+    const summary = { create: count('create'), update: count('update'), same: count('same'), skip: count('skip'), error: count('error'), total: out.length };
+    const usedCats = [...newCats.values()].filter((n) => out.some((x) => x._newCat === n && (x.action === 'create' || x.action === 'update')));
+    const result = { summary, newCategories: usedCats, done: { created: 0, updated: 0 }, failed: [] };
+    if (commit) {
+      const catIds = new Map();
+      for (const name of usedCats) {
+        const first = out.find((x) => x._newCat === name && x.image)?.image;
+        catIds.set(name, this.saveCategory({ name, image: first || '/img/placeholder.svg' }).id);
+      }
+      for (const x of out) {
+        if (x.action !== 'create' && x.action !== 'update') continue;
+        if (x._newCat) x._inp.cat = catIds.get(x._newCat);
+        try {
+          if (x.action === 'create') { x.id = this.createProduct(x._inp).id; result.done.created++; }
+          else { this.updateProduct(x._ex.id, x._inp, 'Spreadsheet import'); result.done.updated++; }
+        } catch (e) { if (!(e instanceof HttpError)) throw e; result.failed.push({ line: x.line, name: x.name, error: e.message }); }
+      }
+    }
+    result.rows = out.map(({ _inp, _ex, _newCat, ...x }) => x);
+    return result;
+  }
+  _sheetShow(f, v) {
+    if (v == null || v === '') return '—';
+    if (f === 'cat') return this.categories.get(v)?.name || v;
+    if (typeof v === 'boolean') return v ? 'yes' : 'no';
+    if (f === 'status') return SHEET_STOCK[v] || v;
+    if (f === 'images') return `${v.length} photo${v.length === 1 ? '' : 's'}`;
+    if (f === 'options') return v.map((o) => `${o.name}: ${o.values.join(', ')}`).join('; ') || '—';
+    if (Array.isArray(v)) return v.join(', ') || '—';
+    const s = String(v);
+    return s.length > 60 ? s.slice(0, 57) + '…' : s;
   }
 
   /* ---------------------------------------------------------- categories */

@@ -1,5 +1,5 @@
 // BLISS admin dashboard: products & stock, orders, customers, marketing and store settings.
-import { CatalogIndex, money, escapeHtml as esc, ORDER_STATUSES, slugify, CHANNELS, computeTotals } from './engine.js';
+import { CatalogIndex, money, escapeHtml as esc, ORDER_STATUSES, slugify, CHANNELS, computeTotals, SHEET_FIELDS, sheetKey } from './engine.js';
 
 /* ================================================================ helpers */
 const $ = (s, r = document) => r.querySelector(s);
@@ -82,7 +82,8 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const statusPill = (s) => `<span class="pill st-${s}">${esc(STATUS[s] || s)}</span>`;
 const stockPill = (s) => `<span class="pill sk-${s}">${ic(STOCK[s][1])}${STOCK[s][0]}</span>`;
-const logoMark = `<svg class="logo-mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M20 21C15 13 6 12 7.5 18.5 8.7 23.4 16 22.6 20 21Zm0 0c5-8 14-9 12.5-2.5C31.3 23.4 24 22.6 20 21Z" fill="currentColor"/><path d="M19 22 14 32l3.2-.6L18.8 34 21 22.6M21 22l5 10-3.2-.6L21.2 34 19 22.6" fill="currentColor" opacity=".7"/><circle cx="20" cy="21.3" r="3" fill="#E3B65C"/></svg>`;
+// The BLISS logo (public/img/brand): black on light backgrounds, white on the dark sidebar.
+const logoImg = (light = false) => `<img class="logo-img" src="/img/brand/bliss-logo${light ? '-white' : ''}.svg" alt="BLISS" width="112" height="40">`;
 
 async function api(path, { method = 'GET', body } = {}) {
   let res;
@@ -136,7 +137,7 @@ function formObj(form) {
 function renderLogin(msg = '') {
   app.innerHTML = `<div class="login">
     <form class="login-card" id="login-form">
-      <div class="login-brand">${logoMark}<b>BLISS</b><span>Dashboard</span></div>
+      <div class="login-brand">${logoImg()}<span>Dashboard</span></div>
       <h1>Welcome back</h1><p class="muted">Log in to manage your products, stock and orders.</p>
       ${msg ? `<div class="banner warn">${ic('info')}<span>${esc(msg)}</span></div>` : ''}
       <label class="field"><span>Username</span><input name="username" autocomplete="username" required autofocus></label>
@@ -171,7 +172,7 @@ const NAV = [
 function renderShell() {
   app.innerHTML = `<div class="shell">
     <aside class="side" id="side">
-      <div class="side-top"><a href="#/" class="brand">${logoMark}<span>${esc(A.me.store || 'BLISS')}</span><small>Admin</small></a><button type="button" class="ibtn side-x" data-act="close-side" aria-label="Close menu">${ic('close')}</button></div>
+      <div class="side-top"><a href="#/" class="brand" aria-label="${esc(A.me.store || 'BLISS')} dashboard home">${logoImg(true)}<small>Admin</small></a><button type="button" class="ibtn side-x" data-act="close-side" aria-label="Close menu">${ic('close')}</button></div>
       <nav class="side-nav">${NAV.map((n) => (typeof n === 'string' ? `<div class="side-h">${n}</div>` : `<a href="${n[1]}" data-nav="${n[0]}">${ic(n[2])}<span>${n[3]}</span>${n[4] ? `<b class="count" data-count="${n[4]}" hidden></b>` : ''}</a>`)).join('')}</nav>
       <div class="side-foot"><a href="/" target="_blank" rel="noopener" class="side-link">${ic('external')}View store</a><button type="button" class="side-link" data-act="logout">${ic('logout')}Log out</button></div>
     </aside>
@@ -221,6 +222,7 @@ const ROUTES = [
   [/^\/abandoned$/, (m, p, el) => viewAbandoned(el, p), 'abandoned'],
   [/^\/products$/, (m, p, el) => viewProducts(el, p), 'products'],
   [/^\/products\/new$/, (m, p, el) => viewProductForm(el, null), 'products'],
+  [/^\/products\/import$/, (m, p, el) => viewProductImport(el), 'products'],
   [/^\/products\/([\w-]+)$/, (m, p, el) => viewProductForm(el, m[1]), 'products'],
   [/^\/inventory$/, (m, p, el) => viewInventory(el, p), 'inventory'],
   [/^\/categories$/, (m, p, el) => viewCategories(el), 'categories'],
@@ -459,7 +461,7 @@ async function viewProducts(el, params) {
   };
   const SORTS = [['newest', 'Newest first'], ['name-asc', 'Name A–Z'], ['price-asc', 'Price: low to high'], ['price-desc', 'Price: high to low'], ['popular', 'Best selling'], ['stock-asc', 'Lowest stock first']];
   el.innerHTML = `
-  <div class="page-head"><div><h1>Products</h1><p>Add, edit and remove products, and control what shoppers see as <b>In stock</b>, <b>Limited</b> or <b>Out of stock</b>.</p></div><div class="head-actions"><a class="btn btn-primary" href="#/products/new">${ic('plus')}Add product</a></div></div>
+  <div class="page-head"><div><h1>Products</h1><p>Add, edit and remove products, and control what shoppers see as <b>In stock</b>, <b>Limited</b> or <b>Out of stock</b>.</p></div><div class="head-actions"><a class="btn btn-ghost" href="#/products/import">${ic('upload')}Import</a><a class="btn btn-ghost" href="/api/admin/products.csv" download>${ic('download')}Export</a><a class="btn btn-primary" href="#/products/new">${ic('plus')}Add product</a></div></div>
   <div class="card card-flush">
     <div class="filter-tabs" id="ptabs"></div>
     <div class="toolbar">
@@ -482,7 +484,7 @@ async function viewProducts(el, params) {
   const rowHtml = (p) => `<tr data-id="${p.id}" class="${p.active ? '' : 'is-hidden'}">
     <td class="sel"><label class="check"><input type="checkbox" class="rowsel" ${st.sel.has(p.id) ? 'checked' : ''} aria-label="Select ${esc(p.name)}"><span class="box"></span></label></td>
     <td class="p-cell"><img src="${esc(p.images[0] || '/img/placeholder.svg')}" alt="" width="44" height="55" loading="lazy"><div><a href="#/products/${p.id}" class="p-name">${esc(p.name)}</a><small>${p.sku ? esc(p.sku) + ' · ' : ''}${esc(catName(p.cat))}${p.options.length ? ` · ${p.options.map((o) => esc(o.name)).join(', ')}` : ''}${p.featured ? ' · ★ Featured' : ''}${!p.active ? ' · <b class="hidden-tag">Hidden</b>' : ''}</small></div></td>
-    <td class="num price-c"><b>${money(p.price)}</b>${p.compare ? `<s>${money(p.compare)}</s>` : ''}</td>
+    <td class="num price-c"><label class="price-box${p.price > 0 ? '' : ' empty'}" title="Type a new price and press Enter"><span>৳</span><input type="number" class="price-in" min="0" step="1" inputmode="decimal" value="${p.price > 0 ? p.price : ''}" placeholder="0" aria-label="Price of ${esc(p.name)}"></label>${p.compare ? `<s>${money(p.compare)}</s>` : ''}</td>
     <td class="qty-c"><input type="number" class="qty-in" min="0" step="1" value="${p.qty ?? ''}" placeholder="—" aria-label="Quantity of ${esc(p.name)}" title="Leave empty to not track quantity">${p.qty != null && p.autoStock ? '<small class="auto" title="Status updates automatically from quantity">auto</small>' : ''}</td>
     <td class="st-c"><div class="stock-seg" role="group" aria-label="Stock status of ${esc(p.name)}">${['in', 'limited', 'out'].map((k) => `<button type="button" class="ss ss-${k}${p.status === k ? ' on' : ''}" data-st="${k}" aria-pressed="${p.status === k}" title="${STOCK[k][0]}">${ic(STOCK[k][1])}<span>${STOCK[k][2]}</span></button>`).join('')}</div></td>
     <td class="num sold-c">${p.sold || 0}</td>
@@ -546,6 +548,19 @@ async function viewProducts(el, params) {
       const qty = t.value === '' ? null : Math.max(0, Math.floor(Number(t.value)));
       try { const r = await api(`/api/admin/products/${id}/stock`, { method: 'PATCH', body: { qty } }); replaceRow(r.product); toast(qty == null ? `${p.name}: quantity not tracked` : `${p.name}: ${qty} in stock → ${STOCK[r.product.status][0]}`); refreshCounts(); }
       catch (err) { toast(err.message, 'error'); replaceRow(p); }
+      return;
+    }
+    if (t.classList.contains('price-in')) {
+      const p = A.products.find((x) => x.id === id);
+      const price = Number(t.value);
+      if (t.value === '' || !Number.isFinite(price) || price < 0) { toast('Type the price in taka, e.g. 350', 'error'); replaceRow(p); return; }
+      if (price === p.price) return;
+      try {
+        const r = await api(`/api/admin/products/${id}`, { method: 'PUT', body: { price } });
+        const saleEnded = p.compare && !r.product.compare;
+        replaceRow(r.product);
+        toast(`${p.name}: price ${money(r.product.price)}${saleEnded ? ' (higher than the old price, so the sale was removed)' : ''}${r.product.active ? '' : '. Turn on Visible to show it in the shop.'}`);
+      } catch (err) { toast(err.message, 'error'); replaceRow(p); }
       return;
     }
     if (t.classList.contains('act-in')) {
@@ -801,6 +816,344 @@ async function viewProductForm(el, id) {
       if (!ex) location.hash = `#/products/${r.product.id}`; else route();
     } catch (err) { setBusy(btn, false); if (err.data?.field && f.elements[err.data.field]) bad(err.data.field, err.message); else toast(err.message, 'error'); }
   });
+}
+
+/* ------------------------------------------------- spreadsheet import */
+// Reads Excel (.xlsx) and CSV files in the browser (no libraries), guesses which column is which,
+// shows the server's preview (nothing is saved), and imports only the rows you approve.
+// Photos: a cell naming a photo file, or a photo named after the product / SKU, is matched to
+// the photos you add; they are fitted and uploaded when you approve.
+const MULTI_FIELDS = new Set(['images', 'tags', 'highlights']);
+const FIELD_BY_KEY = new Map();
+for (const [f, ...names] of SHEET_FIELDS) for (const n of names) if (!FIELD_BY_KEY.has(sheetKey(n))) FIELD_BY_KEY.set(sheetKey(n), f);
+const FIELD_HINTS = [[/(compare|regular|old|original|before).*price|price.*(compare|regular|old|before)/, 'compare'], [/cost|buying|purchase/, 'cost'], [/price|mrp|rate|taka/, 'price'], [/image|photo|picture|img/, 'images'], [/quantity|qty|stock/, 'qty'], [/descr|detail/, 'desc'], [/categ|catag/, 'category'], [/name|title/, 'name'], [/occasion|tag/, 'tags']];
+function guessField(header) {
+  const k = sheetKey(header);
+  if (!k) return '';
+  return FIELD_BY_KEY.get(k) || FIELD_BY_KEY.get(k.replace(/\d+$/, '')) || FIELD_HINTS.find(([re]) => re.test(k))?.[1] || '';
+}
+function parseCsv(text) {
+  text = text.replace(/^﻿/, '');
+  const firstLine = text.split(/\r?\n/, 1)[0];
+  const delim = [',', ';', '\t'].map((d) => [d, firstLine.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = []; let row = [], field = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else quoted = false; } else field += c;
+    } else if (c === '"' && field === '') quoted = true;
+    else if (c === delim) { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(field); rows.push(row); row = []; field = ''; }
+    else field += c;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+/** Excel saves CSV as UTF-8 or as the Windows code page; try UTF-8 first. */
+function decodeText(buf) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('windows-1252').decode(buf); }
+}
+/** Minimal ZIP reader (an .xlsx file is a ZIP of XML files). */
+function unzip(buf) {
+  const dv = new DataView(buf), u8 = new Uint8Array(buf), dec = new TextDecoder();
+  let end = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { end = i; break; }
+  if (end < 0) throw new Error('This file is damaged or not a real Excel file.');
+  const files = new Map();
+  for (let n = 0, p = dv.getUint32(end + 16, true), total = dv.getUint16(end + 10, true); n < total && dv.getUint32(p, true) === 0x02014b50; n++) {
+    const nameLen = dv.getUint16(p + 28, true);
+    files.set(dec.decode(u8.subarray(p + 46, p + 46 + nameLen)), { method: dv.getUint16(p + 10, true), size: dv.getUint32(p + 20, true), at: dv.getUint32(p + 42, true) });
+    p += 46 + nameLen + dv.getUint16(p + 30, true) + dv.getUint16(p + 32, true);
+  }
+  return async (name) => {
+    const f = files.get(name.replace(/^\//, ''));
+    if (!f) return null;
+    const start = f.at + 30 + dv.getUint16(f.at + 26, true) + dv.getUint16(f.at + 28, true), data = u8.subarray(start, start + f.size);
+    if (f.method === 0) return dec.decode(data);
+    if (f.method !== 8) throw new Error('This Excel file uses a format we cannot read. Please save it as CSV.');
+    return new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+  };
+}
+async function readXlsx(buf) {
+  const read = unzip(buf), xml = (s) => new DOMParser().parseFromString(s, 'application/xml');
+  const tag = (node, name) => [...node.getElementsByTagName(name)];
+  const shared = [];
+  const ss = await read('xl/sharedStrings.xml');
+  if (ss) for (const si of tag(xml(ss), 'si')) shared.push(tag(si, 't').filter((t) => t.parentNode.nodeName !== 'rPh').map((t) => t.textContent).join(''));
+  // The first sheet of the workbook (its file name is listed in the workbook's relationships).
+  let sheetPath = 'xl/worksheets/sheet1.xml';
+  const wb = await read('xl/workbook.xml'), rels = await read('xl/_rels/workbook.xml.rels');
+  if (wb && rels) {
+    const rid = tag(xml(wb), 'sheet')[0]?.getAttribute('r:id');
+    const target = tag(xml(rels), 'Relationship').find((r) => r.getAttribute('Id') === rid)?.getAttribute('Target');
+    if (target) sheetPath = target.startsWith('/') ? target.slice(1) : 'xl/' + target.replace(/^\.\//, '');
+  }
+  const sheet = await read(sheetPath);
+  if (!sheet) throw new Error('Could not find a sheet in this Excel file.');
+  const col = (ref) => { let n = 0; for (const ch of ref.replace(/\d+$/, '')) n = n * 26 + ch.charCodeAt(0) - 64; return n - 1; };
+  return tag(xml(sheet), 'row').map((row) => {
+    const cells = [];
+    tag(row, 'c').forEach((c, i) => {
+      const t = c.getAttribute('t'), v = tag(c, 'v')[0]?.textContent ?? '';
+      let val = t === 's' ? shared[+v] ?? '' : t === 'inlineStr' ? tag(c, 't').map((x) => x.textContent).join('') : t === 'b' ? (v === '1' ? 'yes' : 'no') : v;
+      if ((!t || t === 'n') && val !== '' && Number.isFinite(+val)) val = String(Math.round(+val * 1e6) / 1e6); // 199.99999999 -> 200
+      const r = c.getAttribute('r');
+      cells[r ? col(r) : i] = val;
+    });
+    return { line: Number(row.getAttribute('r')) || 0, cells: Array.from(cells, (x) => x ?? '') };
+  });
+}
+async function readSheet(file) {
+  const buf = await file.arrayBuffer(), b = new Uint8Array(buf.slice(0, 4));
+  if (b[0] === 0x50 && b[1] === 0x4b) {
+    if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot open Excel files. Please update it, or save the sheet as CSV.');
+    return readXlsx(buf);
+  }
+  if (b[0] === 0xd0 && b[1] === 0xcf) throw new Error('This is an old Excel file (.xls). In Excel choose File › Save As › Excel Workbook (.xlsx) or CSV, then upload that.');
+  if (/\.(numbers|ods|pdf|docx?)$/i.test(file.name)) throw new Error('Please upload an Excel (.xlsx) or CSV file.');
+  return parseCsv(decodeText(buf)).map((cells, i) => ({ line: i + 1, cells }));
+}
+const csvLine = (cells) => cells.map((v) => { const s = String(v ?? ''); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }).join(',');
+function downloadTemplate() {
+  const rows = [
+    ['SKU', 'Name', 'Category', 'Price', 'Compare at price', 'Cost', 'Quantity', 'Visible', 'For', 'Occasions', 'Highlights', 'Description', 'Images'],
+    ['AT-100', 'Example Attar 6ml', 'Attar', '350', '', '200', '20', 'yes', 'unisex', 'eid, birthday', 'Long-lasting | Alcohol-free', 'A soft floral attar.', 'example-attar.jpg'],
+    ['BQ-100', 'Example Sunflower Bouquet', 'Bouquets', '450', '500', '', '', 'no', 'her', 'birthday, just-because', 'Hand-wrapped', 'Three sunflowers in kraft paper.', 'https://example.com/sunflower.jpg'],
+  ];
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + rows.map(csvLine).join('\r\n')], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'bliss-products-template.csv'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function viewProductImport(el) {
+  const st = { file: null, head: [], data: [], map: [], photos: [], thumbs: [], photoKey: new Map(), existing: 'update', rows: [], preview: null, sel: new Set(), tab: 'all', loading: false, seq: 0 };
+  const FIELD_OPTS = SHEET_FIELDS.map(([f, h]) => [f, h]);
+  const isImage = (f) => /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|avif|heic)$/i.test(f.name);
+  const fileName = (s) => String(s).split(/[\\/]/).pop().toLowerCase();
+  const stem = (s) => fileName(s).replace(/\.[a-z0-9]{2,5}$/, '');
+  const findPhoto = (token) => st.photoKey.get(fileName(token)) ?? st.photoKey.get(stem(token)) ?? st.photoKey.get('k:' + sheetKey(stem(token)));
+  const thumb = (src) => (/^local:\d+$/.test(src || '') ? st.thumbs[+src.slice(6)] : src) || '/img/placeholder.svg';
+
+  el.innerHTML = `
+  <div class="page-head"><div><a class="back" href="#/products">${ic('arrow-left')}Products</a><h1>Import products</h1><p>Add or update many products at once from an Excel (.xlsx) or CSV sheet. You see a preview first, and <b>nothing changes in your shop until you approve it</b>.</p></div>
+    <div class="head-actions"><button type="button" class="btn btn-ghost" id="imp-tpl">${ic('download')}Download template</button><a class="btn btn-ghost" href="/api/admin/products.csv" download>${ic('table')}Export current products</a></div></div>
+  <section class="card"><h2 class="card-title">1. Choose your files</h2>
+    <div class="imp-files">
+      <div class="imp-drop" id="drop-sheet" tabindex="0" role="button"><input type="file" id="in-sheet" accept=".xlsx,.csv,.txt,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden><div id="sheet-info"></div></div>
+      <div class="imp-drop" id="drop-photos" tabindex="0" role="button"><input type="file" id="in-photos" accept="image/*" multiple hidden><div id="photo-info"></div></div>
+    </div>
+    <div class="imp-opt"><span class="flabel">If a product already exists (same ID, SKU or name):</span><div class="seg-sm" id="imp-existing"><button type="button" data-v="update" class="on">Update it</button><button type="button" data-v="skip">Skip it</button></div></div>
+    <details class="imp-help"><summary>${ic('info')}How to fill in the sheet</summary><ul>
+      <li><b>Required for new products:</b> Name, Category and Price. A new category name is created for you.</li>
+      <li><b>Updating:</b> rows are matched to your products by ID, SKU or name. Only the columns you fill in change; empty cells keep the current value. Tip: <b>Export current products</b>, edit the sheet, and import it back.</li>
+      <li><b>Visible:</b> yes / no. <b>Stock status:</b> In stock, Limited or Out of stock (or fill in Quantity and it is set for you). <b>For:</b> her, him, unisex or kids.</li>
+      <li><b>Several values in one cell</b> (Images, Highlights): separate them with <b>|</b>. Occasions: separate with commas, e.g. <i>birthday, anniversary, eid</i>. Options: <i>Size: 6 | 7 | 8; Colour: Gold | Silver</i>.</li>
+      <li><b>Photos:</b> put the photo's file name (e.g. <i>aroosha.jpg</i>) or a https:// link in the Images column and add the photo files above. Or simply name each photo after the product or SKU (e.g. <i>Aroosha.jpg</i>, <i>AT-001.jpg</i>).</li>
+    </ul></details>
+  </section>
+  <div id="imp-map"></div>
+  <div id="imp-preview"></div>`;
+
+  const drawFiles = () => {
+    $('#sheet-info', el).innerHTML = st.file
+      ? `${ic('table', 'imp-ic')}<div><b>${esc(st.file.name)}</b><small>${plural(st.data.length, 'row')} · ${plural(st.head.length, 'column')}</small><button type="button" class="link" data-pick="sheet">Choose another file</button></div>`
+      : `${ic('table', 'imp-ic')}<div><b>Spreadsheet</b><small>Drop your .xlsx or .csv file here, or <span class="link">choose a file</span></small></div>`;
+    const used = st.preview ? new Set(st.rows.flatMap((r) => [...String(r.images || '').matchAll(/local:(\d+)/g)].map((m) => +m[1]))) : null;
+    $('#photo-info', el).innerHTML = st.photos.length
+      ? `${ic('image', 'imp-ic')}<div><b>${plural(st.photos.length, 'photo')}</b><small>${used ? `${used.size} matched to rows${used.size < st.photos.length ? ` · ${st.photos.length - used.size} not used` : ''}` : 'Choose a spreadsheet to match them'}</small><span class="imp-thumbs">${st.thumbs.slice(0, 12).map((u, i) => `<img src="${u}" alt="" class="${used && !used.has(i) ? 'unused' : ''}" title="${esc(st.photos[i].name)}">`).join('')}${st.photos.length > 12 ? `<em>+${st.photos.length - 12}</em>` : ''}</span><span><button type="button" class="link" data-pick="photos">Add more</button> · <button type="button" class="link" id="photos-clear">Remove all</button></span></div>`
+      : `${ic('image', 'imp-ic')}<div><b>Photos <em>(optional)</em></b><small>Drop product photos here, or <span class="link">choose photos</span>. They are matched by file name.</small></div>`;
+  };
+
+  const drawMap = () => {
+    if (!st.file) { $('#imp-map', el).innerHTML = ''; return; }
+    const hasKey = st.map.some((f) => f === 'name' || f === 'sku' || f === 'id');
+    const sample = (ci) => st.data.map((r) => String(r.cells[ci] ?? '').trim()).find(Boolean) || '';
+    const used = st.map.filter(Boolean).map((f) => FIELD_OPTS.find(([k]) => k === f)?.[1]);
+    $('#imp-map', el).innerHTML = `<section class="card"><details class="imp-cols"${hasKey ? '' : ' open'}><summary><h2 class="card-title">2. Check the columns</h2><span class="muted small">${hasKey ? `Reading: ${esc([...new Set(used)].join(', '))}${st.map.some((f) => !f) ? ` · ${plural(st.map.filter((f) => !f).length, 'column')} ignored` : ''}` : ''} <span class="link">Change</span></span></summary>
+      ${hasKey ? '' : `<p class="imp-warn">${ic('alert')}Choose which column has the <b>product name</b> (or SKU).</p>`}
+      <div class="tbl-wrap"><table class="tbl imp-maptbl"><thead><tr><th>Column in your file</th><th>Example</th><th>Use as</th></tr></thead><tbody>
+      ${st.head.map((h, ci) => `<tr><td><b>${esc(h || `Column ${ci + 1}`)}</b></td><td class="muted">${esc(sample(ci).slice(0, 60))}</td><td><select data-col="${ci}" aria-label="Use column ${esc(h)} as"><option value="">Don't import</option>${FIELD_OPTS.map(([f, l]) => `<option value="${f}" ${st.map[ci] === f ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></td></tr>`).join('')}
+      </tbody></table></div></details></section>`;
+  };
+
+  const ACT = { create: ['New', 'act-new', 'plus'], update: ['Update', 'act-upd', 'edit'], same: ['No change', 'act-same', 'check'], skip: ['Skipped', 'act-same', 'minus'], error: ['Problem', 'act-err', 'alert'] };
+  const MONEY_FIELDS = new Set(['Price', 'Compare-at price', 'Cost']);
+  const showVal = (field, v) => (MONEY_FIELDS.has(field) && v !== '—' && Number.isFinite(+v) ? money(v) : v);
+  const selectable = (x) => x.action === 'create' || x.action === 'update';
+  const rowHtml = (x) => {
+    const [label, cls, icon] = ACT[x.action];
+    const msgs = [
+      ...x.errors.map((m) => `<li class="err">${ic('x-circle')}${esc(m)}</li>`),
+      ...x.warnings.map((m) => `<li class="warn">${ic('alert')}${esc(m)}</li>`),
+      ...x.changes.map((c) => `<li>${esc(c.field)}: <s>${esc(showVal(c.field, c.from))}</s> → <b>${esc(showVal(c.field, c.to))}</b></li>`),
+    ];
+    return `<tr data-line="${x.line}" class="imp-row ${cls}">
+      <td class="sel">${selectable(x) ? `<label class="check"><input type="checkbox" class="imp-sel" ${st.sel.has(x.line) ? 'checked' : ''} aria-label="Import ${esc(x.name)}"><span class="box"></span></label>` : ''}</td>
+      <td class="p-cell"><img src="${esc(thumb(x.image))}" alt="" width="44" height="55" loading="lazy"><div><b class="p-name">${esc(x.name)}</b><small>Row ${x.line}${x.category ? ` · ${esc(x.category)}` : ''}${x.newCategory ? ' <span class="pill pill-newcat">new category</span>' : ''}</small></div></td>
+      <td class="num price-c">${x.price != null ? `<b>${money(x.price)}</b>${x.compare ? `<s>${money(x.compare)}</s>` : ''}` : '—'}</td>
+      <td class="imp-stock">${x.status ? stockPill(x.status) : ''}${x.qty != null ? `<small class="muted"> ${x.qty} pcs</small>` : ''}</td>
+      <td class="imp-vis">${x.active == null ? '' : x.active ? 'Visible' : '<span class="muted">Hidden</span>'}</td>
+      <td class="imp-what"><span class="pill ${cls}">${ic(icon)}${label}</span>${msgs.length ? `<ul class="imp-msgs">${msgs.join('')}</ul>` : ''}</td>
+    </tr>`;
+  };
+
+  const drawPreview = () => {
+    const box = $('#imp-preview', el);
+    if (!st.file) { box.innerHTML = ''; return; }
+    if (st.loading && !st.preview) { box.innerHTML = '<section class="card"><div class="loading"><span class="spin"></span></div></section>'; return; }
+    const p = st.preview;
+    if (!p) { box.innerHTML = ''; return; }
+    const s = p.summary;
+    if (!s.total) { box.innerHTML = `<section class="card"><div class="empty">${ic('table', 'empty-ic')}<h2>No products found in this file</h2><p>Check that the first row has column names (Name, Category, Price…) and the products are listed below it.</p></div></section>`; return; }
+    const tabs = [['all', 'All rows', s.total], ['create', 'New', s.create], ['update', 'Updates', s.update], ['error', 'Problems', s.error]].filter(([k, , n]) => k === 'all' || n);
+    if (!tabs.some(([k]) => k === st.tab)) st.tab = 'all';
+    const list = p.rows.filter((x) => st.tab === 'all' || x.action === st.tab);
+    const pickable = p.rows.filter(selectable), n = pickable.filter((x) => st.sel.has(x.line)).length;
+    box.innerHTML = `<section class="card card-flush imp-review${st.loading ? ' is-loading' : ''}">
+      <div class="imp-sum"><h2 class="card-title">3. Review & approve</h2><div class="imp-chips">
+        ${s.create ? `<span class="pill act-new">${ic('plus')}${plural(s.create, 'new product')}</span>` : ''}
+        ${s.update ? `<span class="pill act-upd">${ic('edit')}${plural(s.update, 'update')}</span>` : ''}
+        ${s.same ? `<span class="pill act-same">${ic('check')}${s.same} unchanged</span>` : ''}
+        ${s.skip ? `<span class="pill act-same">${ic('minus')}${s.skip} skipped (already exist)</span>` : ''}
+        ${s.error ? `<span class="pill act-err">${ic('alert')}${plural(s.error, 'row')} with problems (not imported)</span>` : ''}
+        ${p.newCategories.length ? `<span class="pill pill-newcat">${ic('grid')}New ${p.newCategories.length > 1 ? 'categories' : 'category'}: ${esc(p.newCategories.join(', '))}</span>` : ''}
+      </div></div>
+      <div class="filter-tabs">${tabs.map(([k, l, c]) => `<button type="button" class="ftab${st.tab === k ? ' on' : ''}" data-tab="${k}">${l}<b>${c}</b></button>`).join('')}</div>
+      <div class="tbl-wrap"><table class="tbl tbl-products imp-tbl"><thead><tr><th class="sel">${pickable.length ? `<label class="check"><input type="checkbox" id="imp-all" ${n === pickable.length ? 'checked' : ''} aria-label="Select all"><span class="box"></span></label>` : ''}</th><th>Product</th><th class="num">Price</th><th>Stock</th><th>Shop</th><th>What will happen</th></tr></thead>
+      <tbody>${list.map(rowHtml).join('') || `<tr><td colspan="6" class="muted">Nothing here.</td></tr>`}</tbody></table></div>
+    </section>
+    <div class="savebar"><span id="imp-status">${pickable.length ? `<b>${n}</b> of ${plural(pickable.length, 'product')} selected` : 'Nothing to import: fix the problems in your sheet and choose it again.'}</span><a class="btn btn-ghost" href="#/products">Cancel</a><button type="button" class="btn btn-primary" id="imp-go" ${n ? '' : 'disabled'}>${ic('check')}Import ${plural(n, 'product')}</button></div>`;
+  };
+  const draw = () => { drawFiles(); drawMap(); drawPreview(); };
+
+  const buildRows = () => {
+    const rows = [];
+    for (const r of st.data) {
+      const o = { line: r.line };
+      st.map.forEach((f, ci) => {
+        const v = String(r.cells[ci] ?? '').trim();
+        if (f && v) o[f] = o[f] && MULTI_FIELDS.has(f) ? `${o[f]}\n${v}` : o[f] || v;
+      });
+      if (Object.keys(o).length < 2) continue;
+      if (st.photos.length) {
+        if (o.images) o.images = o.images.split(/\s*[|\n,]\s*/).filter(Boolean).map((t) => { if (/^(https?:\/\/|\/)/i.test(t)) return t; const i = findPhoto(t); return i != null ? `local:${i}` : t; }).join('\n');
+        else { const i = [o.sku, o.name].filter(Boolean).map((v) => st.photoKey.get('k:' + sheetKey(v))).find((x) => x != null); if (i != null) o.images = `local:${i}`; }
+      }
+      rows.push(o);
+    }
+    return rows;
+  };
+  const runPreview = async () => {
+    if (!st.file) return;
+    st.rows = buildRows();
+    if (!st.map.some((f) => f === 'name' || f === 'sku' || f === 'id')) { st.preview = null; draw(); return; }
+    const my = ++st.seq; st.loading = true; drawPreview();
+    try {
+      const r = await api('/api/admin/products/import', { method: 'POST', body: { rows: st.rows, existing: st.existing, commit: false } });
+      if (my !== st.seq) return;
+      st.preview = r; st.sel = new Set(r.rows.filter(selectable).map((x) => x.line));
+    } catch (err) { if (my === st.seq) { st.preview = null; toast(err.message, 'error'); } }
+    finally { if (my === st.seq) { st.loading = false; draw(); } }
+  };
+
+  const setSheet = async (file) => {
+    try {
+      const all = (await readSheet(file)).filter((r) => r.cells.some((c) => String(c).trim()));
+      if (!all.length) throw new Error('This file is empty.');
+      // The header is the row (among the first 10) whose cells look most like column names.
+      let hi = 0, best = -1;
+      all.slice(0, 10).forEach((r, i) => { const n = new Set(r.cells.map(guessField).filter(Boolean)).size; if (n > best) { best = n; hi = i; } });
+      st.file = file; st.head = all[hi].cells.map((c) => String(c).trim()); st.data = all.slice(hi + 1);
+      const taken = new Set();
+      st.map = st.head.map((h) => { const f = guessField(h); if (!f || (taken.has(f) && !MULTI_FIELDS.has(f))) return ''; taken.add(f); return f; });
+      st.preview = null; st.tab = 'all';
+      draw(); runPreview();
+    } catch (err) { toast(err.message || 'Could not read this file.', 'error'); }
+  };
+  const addPhotos = (files) => {
+    const list = [...files].filter(isImage);
+    if (!list.length) return;
+    for (const f of list) {
+      const i = st.photos.length;
+      st.photos.push(f); st.thumbs.push(URL.createObjectURL(f));
+      for (const k of [fileName(f.name), stem(f.name), 'k:' + sheetKey(stem(f.name))]) if (!st.photoKey.has(k)) st.photoKey.set(k, i);
+    }
+    drawFiles(); runPreview();
+  };
+  const takeFiles = (files) => {
+    const list = [...files], sheet = list.find((f) => !isImage(f));
+    addPhotos(list.filter(isImage));
+    if (sheet) setSheet(sheet);
+  };
+
+  const commit = async (btn) => {
+    const chosen = st.rows.filter((r) => st.sel.has(r.line));
+    if (!chosen.length) return;
+    setBusy(btn, true, 'Importing…');
+    const status = $('#imp-status', el);
+    try {
+      const need = [...new Set(chosen.flatMap((r) => [...String(r.images || '').matchAll(/local:(\d+)/g)].map((m) => +m[1])))];
+      const urls = new Map();
+      for (const [k, i] of need.entries()) { status.textContent = `Fitting & uploading photo ${k + 1} of ${need.length}…`; urls.set(i, await uploadImage(st.photos[i])); }
+      status.textContent = 'Saving products…';
+      const rows = chosen.map((r) => (r.images ? { ...r, images: r.images.replace(/local:(\d+)/g, (_, i) => urls.get(+i)) } : r));
+      const res = await api('/api/admin/products/import', { method: 'POST', body: { rows, existing: st.existing, commit: true } });
+      A.products = [];
+      refreshCounts();
+      const d = res.done;
+      el.innerHTML = `<div class="page-head"><div><a class="back" href="#/products">${ic('arrow-left')}Products</a><h1>Import finished</h1></div></div>
+        <section class="card"><div class="empty">${ic('check-circle', 'empty-ic')}<h2>${[d.created && plural(d.created, 'product') + ' added', d.updated && plural(d.updated, 'product') + ' updated'].filter(Boolean).join(' · ') || 'Nothing was changed'}</h2>
+        ${res.newCategories.length ? `<p>New ${res.newCategories.length > 1 ? 'categories' : 'category'} created: <b>${esc(res.newCategories.join(', '))}</b>. Add a photo for ${res.newCategories.length > 1 ? 'them' : 'it'} in <a class="link" href="#/categories">Categories</a>.</p>` : ''}
+        ${res.failed.length ? `<ul class="imp-msgs">${res.failed.map((f) => `<li class="err">${ic('x-circle')}Row ${f.line} (${esc(f.name)}): ${esc(f.error)}</li>`).join('')}</ul>` : ''}
+        <div class="head-actions"><a class="btn btn-primary" href="#/products">View products</a><a class="btn btn-ghost" href="#/products/import" id="imp-again">Import another file</a></div></div></section>`;
+      $('#imp-again', el).addEventListener('click', (e) => { e.preventDefault(); route(); });
+      st.thumbs.forEach((u) => URL.revokeObjectURL(u));
+      toast('Import finished');
+    } catch (err) { toast(err.message, 'error'); setBusy(btn, false); drawPreview(); }
+  };
+
+  // Events
+  const pick = (which) => $(which === 'sheet' ? '#in-sheet' : '#in-photos', el).click();
+  for (const [id, which] of [['#drop-sheet', 'sheet'], ['#drop-photos', 'photos']]) {
+    const zone = $(id, el);
+    zone.addEventListener('click', (e) => { if (e.target.closest('#photos-clear, input')) return; const b = e.target.closest('[data-pick]'); pick(b ? b.dataset.pick : which); });
+    zone.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(which); } });
+    ['dragenter', 'dragover'].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add('over'); }));
+    ['dragleave', 'drop'].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove('over'); }));
+    zone.addEventListener('drop', (e) => takeFiles(e.dataTransfer.files));
+  }
+  $('#in-sheet', el).addEventListener('change', (e) => { if (e.target.files[0]) takeFiles(e.target.files); e.target.value = ''; });
+  $('#in-photos', el).addEventListener('change', (e) => { addPhotos(e.target.files); e.target.value = ''; });
+  $('#imp-tpl', el).addEventListener('click', downloadTemplate);
+  el.addEventListener('click', (e) => {
+    if (e.target.closest('#photos-clear')) { st.thumbs.forEach((u) => URL.revokeObjectURL(u)); st.photos = []; st.thumbs = []; st.photoKey.clear(); drawFiles(); runPreview(); return; }
+    const seg = e.target.closest('#imp-existing button');
+    if (seg) { st.existing = seg.dataset.v; $$('#imp-existing button', el).forEach((b) => b.classList.toggle('on', b === seg)); runPreview(); return; }
+    const tab = e.target.closest('.imp-review .ftab');
+    if (tab) { st.tab = tab.dataset.tab; drawPreview(); return; }
+    const go = e.target.closest('#imp-go');
+    if (go) commit(go);
+  });
+  el.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.matches('select[data-col]')) {
+      const ci = +t.dataset.col, f = t.value;
+      if (f && !MULTI_FIELDS.has(f)) st.map = st.map.map((x, k) => (x === f && k !== ci ? '' : x));
+      st.map[ci] = f;
+      drawMap(); $('.imp-cols', el).open = true; runPreview();
+      return;
+    }
+    if (t.id === 'imp-all') { for (const x of st.preview.rows.filter(selectable)) { if (t.checked) st.sel.add(x.line); else st.sel.delete(x.line); } $$('.imp-sel', el).forEach((c) => { c.checked = t.checked; }); updateSel(); return; }
+    if (t.classList.contains('imp-sel')) { const line = +t.closest('tr').dataset.line; if (t.checked) st.sel.add(line); else st.sel.delete(line); updateSel(); }
+  });
+  const updateSel = () => {
+    const pickable = st.preview.rows.filter(selectable), n = pickable.filter((x) => st.sel.has(x.line)).length;
+    $('#imp-status', el).innerHTML = `<b>${n}</b> of ${plural(pickable.length, 'product')} selected`;
+    const go = $('#imp-go', el); go.disabled = !n; go.innerHTML = `${ic('check')}Import ${plural(n, 'product')}`;
+    const all = $('#imp-all', el); if (all) all.checked = n === pickable.length;
+  };
+  draw();
 }
 
 /* ================================================================= orders */

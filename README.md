@@ -38,6 +38,22 @@ to launch.
 | Show **In stock / Limited stock / Out of stock** | Click **In**, **Limited** or **Out** on the product's row. The shop updates instantly. |
 | Hide a product without deleting | Turn off the **Visible** switch |
 | Change many products at once | Tick the rows → use the black bar (In stock / Limited / Out / Show / Hide / Delete) |
+| Add or update many products from a sheet | **Import** → choose an Excel (.xlsx) or CSV file (+ photos, optional) → check the preview → **Import** |
+| Download all products as a sheet | **Export** (opens in Excel; edit it and import it back to update prices, stock, etc.) |
+
+**Import from a spreadsheet:** the first row holds the column names (Name, Category, Price, Quantity, Visible,
+Description, Images… — common alternatives such as "Product name" or "Price (৳)" are recognised, and you can
+change the matching on screen). Rows are matched to existing products by ID, SKU or name; empty cells keep the
+current value, and a new category name creates the category. Photos: put the photo's file name or a https://
+link in the Images column and add the photo files, or name each photo after the product or SKU
+(`Aroosha.jpg`, `AT-001.jpg`). Nothing is saved until you approve the preview. **Download template** gives an example sheet.
+
+A product needs a price above ৳0 before it can be shown in the shop, and categories without a visible product
+are hidden from shoppers.
+
+**BLISS's own products** (Bouquets and Attar) live in `server/catalog.js` with photos in `public/img/bouquets/`.
+They are added once to every database on start, so they also appear on Vercel. The attars start **hidden** with no
+price: add the price (and a photo), then switch on **Visible**.
 
 **Quantity (optional):** if you type a quantity, the status updates automatically:
 `0` → *Out of stock*, `5 or fewer` → *Limited stock* (shoppers see "Only 3 left"),

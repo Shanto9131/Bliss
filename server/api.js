@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { Router, HttpError, readJson, readBody, parseCookies, cookie, sendJson, RateLimiter, clientIp, isSecure } from './http.js';
 import { sendEntry } from './static.js';
-import { CatalogIndex, ORDER_STATUSES, CHANNELS } from '../public/assets/js/engine.js';
+import { CatalogIndex, ORDER_STATUSES, CHANNELS, SHEET_FIELDS } from '../public/assets/js/engine.js';
 import { dhakaDate, normPhone, EXPENSE_CATEGORIES } from './db.js';
 import * as R from './reports.js';
 
@@ -216,6 +216,16 @@ export function buildApi({ store, tokens, renderer, uploadsDir }) {
     return { ok: true };
   });
   r.patch('/api/admin/products/:id/stock', async (ctx) => { admin(ctx); return { product: store.setStock(ctx.params.id, await readJson(ctx.req)) }; });
+  // Spreadsheet export / import. The import is previewed first (commit: false) and saved on approval.
+  r.get('/api/admin/products.csv', (ctx) => {
+    admin(ctx);
+    sendCsv(ctx, 'bliss-products', SHEET_FIELDS.map((f) => f[1]), store.data.products.map((p) => store.sheetRow(p)));
+  });
+  r.post('/api/admin/products/import', async (ctx) => {
+    admin(ctx);
+    const b = await readJson(ctx.req, 6_000_000);
+    return store.importProducts(b.rows, { commit: b.commit === true, existing: b.existing === 'skip' ? 'skip' : 'update' });
+  });
   r.post('/api/admin/products/bulk', async (ctx) => {
     admin(ctx);
     const b = await readJson(ctx.req);
